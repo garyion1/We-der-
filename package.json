@@ -1,0 +1,28 @@
+{
+  "name": "donutsmp-autosell",
+  "version": "0.1.0",
+  "description": "Discord bot that lets DonutSMP players sell in-game money for Litecoin, paid instantly.",
+  "type": "module",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "deploy-commands": "node src/discord/deployCommands.js"
+  },
+  "dependencies": {
+    "bip32": "^4.0.0",
+    "bip39": "^3.1.0",
+    "bitcoinjs-lib": "^6.1.5",
+    "better-sqlite3": "^11.3.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "ecpair": "^2.1.0",
+    "mineflayer": "^4.25.0",
+    "node-fetch": "^3.3.2",
+    "tiny-secp256k1": "^2.2.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
