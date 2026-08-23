@@ -59,6 +59,16 @@ permissions, don't commit it, and don't log it.
 
 ## Setup
 
+**On a Mac**, the fastest path is the guided setup script — it installs dependencies, walks you
+through pasting each secret (locally, never leaves your machine), generates the hot wallet seed if
+you don't have one yet, and registers the slash commands:
+
+```bash
+./scripts/setup-mac.sh
+```
+
+Or manually:
+
 ```bash
 npm install
 cp .env.example .env    # fill in every value described above
