@@ -66,6 +66,8 @@ public class BuildExecutor {
     /** The creative-mode item fetch in progress, and which hotbar slot it's going into. */
     private Item fetchItem;
     private int fetchSlot;
+    /** Last skip/failure reason echoed to chat, so an unchanged reason repeating many times in a row doesn't spam it. */
+    private String lastAnnouncedReason = "";
 
     /** Materials the auction house couldn't supply; don't keep retrying them. */
     private final Set<Item> unbuyable = new HashSet<>();
@@ -346,7 +348,7 @@ public class BuildExecutor {
                 && System.currentTimeMillis() - lastVerifyAtMs > config.verifyIntervalSeconds * 1000L) {
             lastVerifyAtMs = System.currentTimeMillis();
             if (hasDrifted(client)) {
-                statusMessage = "schematic drifted -- replanning";
+                announceStatus(player, "schematic drifted -- replanning");
                 resetInputs();
                 state = State.PLANNING;
                 return;
@@ -468,7 +470,7 @@ public class BuildExecutor {
             // several of these scattered around a floating section, that
             // reads as wandering pointlessly from spot to spot. Skip it here,
             // before a single step is taken.
-            statusMessage = "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from";
+            announceStatus(player, "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from");
             skipped.add(bp);
             consecutiveFailures++;
             advance(false);
@@ -479,13 +481,19 @@ public class BuildExecutor {
             path = buildPath(client, player, standGoal, true, true);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
-                statusMessage = "couldn't find a way to " + bp.pos().toShortString();
+                announceStatus(player, "couldn't find a way to " + bp.pos().toShortString());
                 skipped.add(bp);
                 consecutiveFailures++;
                 resetInputs();
                 advance(false);
                 return;
             }
+            // Visible in the Status tab's "Doing" line for as long as this walk
+            // takes -- previously the only thing shown during a long walk was
+            // whatever the last one-off message happened to be, sometimes
+            // minutes stale, which is exactly what makes a long walk look like
+            // directionless wandering rather than a walk with a destination.
+            statusMessage = "walking to " + bp.pos().toShortString() + " (" + path.size() + " steps)";
         }
 
         if (pathIndex >= path.size()) {
@@ -708,7 +716,7 @@ public class BuildExecutor {
         int pearlSlot = findHotbarOrInventorySlot(player, Items.ENDER_PEARL);
         int pearlCount = countItem(player, Items.ENDER_PEARL);
         if (pearlSlot < 0 || pearlCount <= config.pearlReserve) {
-            statusMessage = "out of ender pearls (reserve=" + config.pearlReserve + ") -- can't climb, skipping block";
+            announceStatus(player, "out of ender pearls (reserve=" + config.pearlReserve + ") -- can't climb, skipping block");
             consecutiveFailures++;
             advance(false);
             return;
@@ -777,7 +785,7 @@ public class BuildExecutor {
             // world, a schematic placed somewhere it doesn't actually rest on
             // anything) looks like: there's nothing sensible to click, so skip
             // it, but say so instead of just counting a silent failure.
-            statusMessage = "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from";
+            announceStatus(player, "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from");
             skipped.add(bp);
             advance(false);
             return;
@@ -949,7 +957,7 @@ public class BuildExecutor {
         // swinging forever, so give up after a while and move on.
         if (++breakTicks > MAX_BREAK_TICKS) {
             breakTicks = 0;
-            statusMessage = "couldn't break the block at " + bp.pos().toShortString();
+            announceStatus(client.player, "couldn't break the block at " + bp.pos().toShortString());
             skipped.add(bp);
             consecutiveFailures++;
             advance(false);
@@ -963,7 +971,7 @@ public class BuildExecutor {
     private void handlePlace(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (bp.supportNeighbor() == null || bp.clickFace() == null) {
             // Stranded block with no computed support -- can't place it. Skip.
-            statusMessage = "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from";
+            announceStatus(player, "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from");
             skipped.add(bp);
             consecutiveFailures++;
             advance(false);
@@ -998,8 +1006,8 @@ public class BuildExecutor {
             // Wrong block sitting in a schematic position is a deviation, so say
             // so rather than quietly counting it.
             if (!now.isAir()) {
-                statusMessage = "wrong block at " + bp.pos().toShortString()
-                        + ": got " + now.getBlock().getName().getString();
+                announceStatus(player, "wrong block at " + bp.pos().toShortString()
+                        + ": got " + now.getBlock().getName().getString());
             }
             skipped.add(bp);
             consecutiveFailures++;
@@ -1014,6 +1022,22 @@ public class BuildExecutor {
     private void handleDwell(ClientPlayerEntity player) {
         if (waitTicks-- <= 0) {
             advance(true);
+        }
+    }
+
+    /**
+     * Sets statusMessage as usual, but also echoes genuinely new skip/failure
+     * reasons to chat. These were previously only visible by pausing to open
+     * the Status tab -- diagnosing a build that's stalled or behaving oddly
+     * meant guessing from character movement alone. Deduped against the last
+     * reason sent so the same failure repeating many times in a row (a whole
+     * batch of stranded blocks, say) posts once, not on every occurrence.
+     */
+    private void announceStatus(ClientPlayerEntity player, String message) {
+        statusMessage = message;
+        if (!message.equals(lastAnnouncedReason)) {
+            lastAnnouncedReason = message;
+            player.sendMessage(Text.literal("[Auto Builder] " + message), false);
         }
     }
 
