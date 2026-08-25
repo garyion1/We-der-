@@ -27,7 +27,16 @@ jobs:
         working-directory: mod
         run: |
           chmod +x gradlew
-          ./gradlew build --stacktrace --no-daemon
+          # Without --stacktrace: Gradle's stack traces run to hundreds of lines
+          # and push the actual "What went wrong" message out of the log tail.
+          # On failure, re-print just the diagnostic section so it's readable.
+          set -o pipefail
+          ./gradlew build --no-daemon 2>&1 | tee build.log || {
+            echo "===================== FAILURE DETAIL ====================="
+            grep -B2 -A40 "What went wrong" build.log || tail -60 build.log
+            echo "=========================================================="
+            exit 1
+          }
 
       - name: Upload jar
         if: success()
