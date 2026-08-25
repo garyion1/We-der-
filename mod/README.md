@@ -81,9 +81,10 @@ cd mod
 ./gradlew build
 ```
 
-The Gradle wrapper is included, pinning Gradle 8.14 -- use `./gradlew`, not a
-system-installed `gradle`. Homebrew currently installs Gradle 9.x, which trips
-over Loom's own deprecated API usage.
+The Gradle wrapper is included, pinning **Gradle 9.2** -- use `./gradlew` rather
+than a system `gradle`, so the version is guaranteed. Loom 1.14 publishes only a
+Gradle 9.2 variant and fails to resolve on Gradle 8.x with a "no matching variant
+... org.gradle.plugin.api-version" error.
 
 Output jar lands in `build/libs/` (ignore the `-sources` one; the plain
 `auto-litematica-builder-0.1.0.jar` is the mod). Drop it in `.minecraft/mods/`
