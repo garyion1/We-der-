@@ -59,6 +59,28 @@ public class BuilderConfig {
     public boolean verifyPass = true;
     /** How many times to re-attempt a placement that didn't take before giving up. */
     public int maxRetriesPerBlock = 2;
+    /**
+     * Finish a whole Y layer before starting the next. Without this, support
+     * rules let the builder climb early wherever a neighbour happens to exist,
+     * and the build stops looking like it's going up a layer at a time.
+     */
+    public boolean strictLayers = true;
+    /**
+     * Treat a placement as successful only if the block that appeared is the one
+     * the schematic asked for, rather than merely "something is there now".
+     */
+    public boolean strictBlockMatch = true;
+    /** Break blocks standing inside the schematic's bounds that it doesn't want. */
+    public boolean removeExtraBlocks = false;
+    /**
+     * Re-check finished layers every so often and repair anything that has
+     * changed -- water spreading, mobs, another player, a failed placement.
+     */
+    public boolean continuousVerify = false;
+    /** Seconds between those re-checks. */
+    public int verifyIntervalSeconds = 120;
+    /** Pick the fastest tool in the inventory before breaking a block. */
+    public boolean autoSelectTool = true;
 
     // ================================================================ movement
 
@@ -177,4 +199,9 @@ public class BuilderConfig {
     public boolean stopWhenInventoryFull = false;
     /** Stop rather than carry on if this many placements in a row fail. */
     public int stopAfterConsecutiveFailures = 25;
+
+    // ================================================================ persistence
+
+    /** Remember these settings between launches. */
+    public boolean saveSettings = true;
 }

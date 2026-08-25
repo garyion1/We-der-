@@ -83,6 +83,9 @@ public class BuildExecutor {
     /** Ticks spent mining the current obstruction; caps how long one block can stall. */
     private int breakTicks;
     private static final int MAX_BREAK_TICKS = 200; // 10 seconds
+    /** How many already-built blocks a drift check samples before giving up. */
+    private static final int DRIFT_SAMPLE = 400;
+    private long lastVerifyAtMs;
 
     public BuildExecutor(BuilderConfig config, SchematicSource schematic) {
         this.config = config;
@@ -105,6 +108,7 @@ public class BuildExecutor {
         this.blocksSinceBreak = 0;
         this.nextBreakAt = jitteredBreakInterval();
         this.buildStartedAtMs = System.currentTimeMillis();
+        this.lastVerifyAtMs = this.buildStartedAtMs;
         state = State.PLANNING;
     }
 
@@ -126,6 +130,50 @@ public class BuildExecutor {
     public int getTotalCount() { return plan == null ? 0 : plan.order().size(); }
     public int getSkippedCount() { return skipped.size(); }
     public int getFatiguePercent() { return (int) Math.round(motion.fatigue() * 100); }
+    public int getRemovalCount() { return plan == null ? 0 : plan.removals(); }
+
+    /** Which Y layer is being worked on, and how many there are. */
+    public String getLayerProgress() {
+        if (plan == null || placementIndex >= plan.order().size()) return "-";
+        int y = plan.order().get(placementIndex).pos().getY();
+        int total = plan.maxLayer() - plan.minLayer() + 1;
+        int index = y - plan.minLayer() + 1;
+        return "y=" + y + "  (" + index + " of " + total + ")";
+    }
+
+    /** Blocks placed per minute, measured over the run so far. */
+    public double getBlocksPerMinute() {
+        long elapsed = System.currentTimeMillis() - buildStartedAtMs;
+        if (elapsed < 5000 || placedCount == 0) return 0;
+        return placedCount / (elapsed / 60000.0);
+    }
+
+    /** Rough finish estimate from the observed rate; empty until it means something. */
+    public String getEta() {
+        double rate = getBlocksPerMinute();
+        if (rate <= 0 || plan == null) return "--";
+        int left = plan.order().size() - placementIndex;
+        if (left <= 0) return "done";
+        int minutes = (int) Math.ceil(left / rate);
+        if (minutes < 60) return minutes + " min";
+        return (minutes / 60) + "h " + (minutes % 60) + "m";
+    }
+
+    /** What the plan still needs, minus what's already carried. */
+    public Map<Item, Integer> getShortfall(MinecraftClient client) {
+        Map<Item, Integer> shortfall = new LinkedHashMap<>();
+        if (plan == null || client.player == null) return shortfall;
+        for (Map.Entry<Item, Integer> e : plan.materialsNeeded().entrySet()) {
+            int have = countItem(client.player, e.getKey());
+            int missing = e.getValue() - have;
+            if (missing > 0) shortfall.put(e.getKey(), missing);
+        }
+        return shortfall;
+    }
+
+    public Map<Item, Integer> getMaterials() {
+        return plan == null ? Map.of() : plan.materialsNeeded();
+    }
 
     public boolean isAwaitingPurchaseConfirmation() { return auctionBuyer.awaitingConfirmation(); }
     public String getPurchasePrompt() { return auctionBuyer.confirmationPrompt(); }
@@ -171,8 +219,23 @@ public class BuildExecutor {
             }
         }
 
+        // Anything standing inside the schematic's own bounds that the schematic
+        // doesn't call for is a deviation. Optionally clear it, so the finished
+        // build matches the schematic rather than merely containing it.
+        Set<BlockPos> toRemove = new HashSet<>();
+        if (config.removeExtraBlocks) {
+            for (BlockPos pos : target.keySet()) {
+                // (bounds are the schematic's own positions; only those are touched)
+                BlockState wanted = target.get(pos);
+                BlockState actual = client.world.getBlockState(pos);
+                if (wanted != null && wanted.isAir() && !actual.isAir()) {
+                    toRemove.add(pos);
+                }
+            }
+        }
+
         BuildPlanner planner = new BuildPlanner(config);
-        plan = planner.plan(toPlace, worldSolid, player.getBlockPos());
+        plan = planner.plan(toPlace, toRemove, worldSolid, player.getBlockPos());
         placementIndex = 0;
         retriesOnCurrent = 0;
         consecutiveFailures = 0;
@@ -232,6 +295,20 @@ public class BuildExecutor {
             return;
         }
 
+        // Periodically re-diff the whole schematic mid-build. Water spreads, mobs
+        // break things, another player edits the area, a placement silently
+        // failed -- without this the builder would march on past all of it.
+        if (config.continuousVerify
+                && System.currentTimeMillis() - lastVerifyAtMs > config.verifyIntervalSeconds * 1000L) {
+            lastVerifyAtMs = System.currentTimeMillis();
+            if (hasDrifted(client)) {
+                statusMessage = "schematic drifted -- replanning";
+                resetInputs();
+                state = State.PLANNING;
+                return;
+            }
+        }
+
         BlockPlacement bp = plan.order().get(placementIndex);
 
         switch (step) {
@@ -279,6 +356,24 @@ public class BuildExecutor {
             return consecutiveFailures + " placements in a row failed -- something is wrong";
         }
         return null;
+    }
+
+    /**
+     * Has anything already built stopped matching the schematic? Only checks the
+     * portion the plan has passed, since what's ahead is expected to be wrong.
+     */
+    private boolean hasDrifted(MinecraftClient client) {
+        Map<BlockPos, BlockState> target = schematic.getTargetBlocks();
+        int checked = 0;
+        for (int i = 0; i < placementIndex && checked < DRIFT_SAMPLE; i++) {
+            BlockPlacement bp = plan.order().get(i);
+            if (bp.isRemoval() || bp.temporaryScaffold()) continue;
+            BlockState wanted = target.get(bp.pos());
+            if (wanted == null) continue;
+            checked++;
+            if (!matchesTarget(client.world.getBlockState(bp.pos()), wanted)) return true;
+        }
+        return false;
     }
 
     private boolean isInventoryFull(ClientPlayerEntity player) {
@@ -378,6 +473,29 @@ public class BuildExecutor {
         resetInputs();
         state = State.DONE;
         statusMessage = finishedMessage + " -- " + note;
+    }
+
+    /**
+     * Puts the fastest available tool for this block in hand. Uses the game's own
+     * mining-speed calculation rather than a hardcoded table, so it picks
+     * sensibly for modded and vanilla blocks alike.
+     */
+    private void selectBestTool(MinecraftClient client, ClientPlayerEntity player, BlockPos pos) {
+        BlockState state = client.world.getBlockState(pos);
+        var inventory = player.getInventory();
+        int bestSlot = inventory.getSelectedSlot();
+        float bestSpeed = inventory.getStack(bestSlot).getMiningSpeedMultiplier(state);
+
+        for (int i = 0; i <= 8; i++) {
+            float speed = inventory.getStack(i).getMiningSpeedMultiplier(state);
+            if (speed > bestSpeed) {
+                bestSpeed = speed;
+                bestSlot = i;
+            }
+        }
+        if (bestSlot != inventory.getSelectedSlot()) {
+            selectHotbarSlot(player, bestSlot);
+        }
     }
 
     private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player,
@@ -559,13 +677,23 @@ public class BuildExecutor {
     }
 
     private void handleEnsureItem(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
+        // A removal needs no material -- just the right tool, then break it.
+        if (bp.isRemoval()) {
+            if (config.autoSelectTool) selectBestTool(client, player, bp.pos());
+            step = Step.BREAK;
+            return;
+        }
         Item needed = bp.state().getBlock().asItem();
         int hotbarSlot = findHotbarOrInventorySlot(player, needed);
         if (hotbarSlot >= 0) {
             selectHotbarSlot(player, hotbarSlot);
-            step = config.breakWrongBlocks && !client.world.getBlockState(bp.pos()).isAir()
-                    ? Step.BREAK
-                    : Step.PLACE;
+            boolean occupied = !client.world.getBlockState(bp.pos()).isAir();
+            if (config.breakWrongBlocks && occupied) {
+                if (config.autoSelectTool) selectBestTool(client, player, bp.pos());
+                step = Step.BREAK;
+            } else {
+                step = Step.PLACE;
+            }
             return;
         }
 
@@ -617,6 +745,24 @@ public class BuildExecutor {
         return Math.max(8, (int) Math.round(jittered));
     }
 
+    /**
+     * Is what's in the world what the schematic wanted?
+     *
+     * Full state equality is too strict in practice: fences, walls, stairs and
+     * redstone rewrite their own connection/shape properties from surroundings,
+     * so a correctly-placed block legitimately differs from the schematic's
+     * recorded state until its neighbours exist. Comparing the block itself
+     * catches the case that actually matters -- the wrong material -- without
+     * fighting blocks that adjust themselves.
+     */
+    private boolean matchesTarget(BlockState actual, BlockState wanted) {
+        if (wanted == null) return actual.isAir();          // removal
+        if (actual.isAir()) return false;
+        return config.strictBlockMatch
+                ? actual.getBlock() == wanted.getBlock()
+                : !actual.isAir();
+    }
+
     /** How many more of this item the rest of the plan calls for. */
     private int remainingNeedFor(Item item) {
         int count = 0;
@@ -658,11 +804,12 @@ public class BuildExecutor {
         player.swingHand(Hand.MAIN_HAND);
         motion.noteAction();
 
-        // Did it actually land? A click can be rejected by the server, blocked by
-        // an entity, or mis-aimed, and counting it as placed regardless would make
-        // the progress figure a lie.
+        // Did the RIGHT block land? Checking only for "not air" would accept a
+        // wrong block as success -- exactly the case that makes a build drift
+        // away from the schematic. Compare against what was asked for.
         BlockState now = client.world.getBlockState(bp.pos());
-        if (now.isAir() && retriesOnCurrent < config.maxRetriesPerBlock) {
+        boolean correct = matchesTarget(now, bp.state());
+        if (!correct && retriesOnCurrent < config.maxRetriesPerBlock) {
             retriesOnCurrent++;
             consecutiveFailures++;
             // Re-aim and try the same block again rather than moving on --
@@ -671,10 +818,16 @@ public class BuildExecutor {
             step = Step.RETRY_WAIT;
             return;
         }
-        if (!now.isAir()) {
+        if (correct) {
             placedCount++;
             consecutiveFailures = 0;
         } else {
+            // Wrong block sitting in a schematic position is a deviation, so say
+            // so rather than quietly counting it.
+            if (!now.isAir()) {
+                statusMessage = "wrong block at " + bp.pos().toShortString()
+                        + ": got " + now.getBlock().getName().getString();
+            }
             skipped.add(bp);
             consecutiveFailures++;
         }
