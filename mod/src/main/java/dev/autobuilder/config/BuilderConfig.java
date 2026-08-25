@@ -118,8 +118,12 @@ public class BuilderConfig {
      * Tune to your server's wording, e.g. "\\$([0-9,.]+)" or "Price: ([0-9,.]+)".
      */
     public String auctionPriceRegex = "\\$\\s*([0-9][0-9,.]*)";
-    /** Skip listings dearer than this per item. */
-    public double maxUnitPrice = 1_000_000.0;
+    /**
+     * Hard ceiling on price PER ITEM (a 64-stack for 320k is 5k each, so it
+     * passes). Nothing dearer is ever bought -- listings above this are skipped
+     * outright rather than bought as a last resort.
+     */
+    public double maxUnitPrice = 100_000.0;
     /** Some auction GUIs need a second click to confirm a purchase. */
     public boolean auctionRequiresConfirmClick = false;
     public int auctionConfirmDelayTicks = 4;

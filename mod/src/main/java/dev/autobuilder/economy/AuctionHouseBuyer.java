@@ -155,8 +155,11 @@ public class AuctionHouseBuyer {
         bestListing = scanForCheapest(handler);
         if (bestListing != null) {
             phase = Phase.CLICKING;
+        } else if (sawTooExpensive) {
+            finishByInventory(client, "every listing is over the "
+                    + String.format("%,.0f", config.maxUnitPrice) + "/item cap");
         } else {
-            finishByInventory(client, "no listing matched the price pattern under the max price");
+            finishByInventory(client, "no listing's price could be read -- check the price pattern");
         }
     }
 
@@ -177,8 +180,11 @@ public class AuctionHouseBuyer {
         client.interactionManager.clickSlot(syncId, slotId, 0, SlotActionType.PICKUP, client.player);
     }
 
+    private boolean sawTooExpensive;
+
     private Listing scanForCheapest(ScreenHandler handler) {
         Listing best = null;
+        sawTooExpensive = false;
         for (Slot slot : handler.slots) {
             // Only the container's own slots are listings; the lower rows are the
             // player's own inventory and must never be clicked as if they were.
@@ -186,7 +192,13 @@ public class AuctionHouseBuyer {
                 ItemStack stack = slot.getStack();
                 if (stack.isEmpty()) continue;
                 Double unitPrice = extractUnitPrice(stack);
-                if (unitPrice == null || unitPrice > config.maxUnitPrice) continue;
+                // A listing whose price can't be read is never bought: an
+                // unparseable price is treated as too expensive, not as free.
+                if (unitPrice == null) continue;
+                if (unitPrice > config.maxUnitPrice) {
+                    sawTooExpensive = true;
+                    continue;
+                }
                 if (best == null || unitPrice < best.unitPrice()) {
                     best = new Listing(slot.id, unitPrice, stack.getCount());
                 }

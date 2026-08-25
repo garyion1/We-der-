@@ -62,7 +62,14 @@ public class BuildExecutor {
     /** Materials the auction house couldn't supply; don't keep retrying them. */
     private final Set<Item> unbuyable = new HashSet<>();
     private int blocksSinceBreak;
+    private int nextBreakAt = Integer.MAX_VALUE;
     private long buildStartedAtMs;
+    private HumanMotion.LookState restGazeTarget;
+    /** Where to glance while dwelling, when the builder looks ahead to the next block. */
+    private HumanMotion.LookState glanceTarget;
+    /** A brief look away from the path while walking, and how long it lasts. */
+    private HumanMotion.LookState walkGaze;
+    private int walkGazeTicks;
 
     public BuildExecutor(BuilderConfig config, SchematicSource schematic) {
         this.config = config;
@@ -79,6 +86,7 @@ public class BuildExecutor {
         this.motion = new HumanMotion(config.pace); // pick up any pace change from the GUI
         this.unbuyable.clear();
         this.blocksSinceBreak = 0;
+        this.nextBreakAt = jitteredBreakInterval();
         this.buildStartedAtMs = System.currentTimeMillis();
         state = State.PLANNING;
     }
@@ -177,7 +185,7 @@ public class BuildExecutor {
             case ENSURE_ITEM -> handleEnsureItem(client, player, bp);
             case BREAK -> handleBreak(client, bp);
             case PLACE -> handlePlace(client, player, bp);
-            case DWELL -> handleDwell();
+            case DWELL -> handleDwell(player);
             case REST -> handleRest(player);
             case SKIP -> advance(false);
         }
@@ -204,14 +212,25 @@ public class BuildExecutor {
         return null;
     }
 
-    /** A pause between stretches of work, the way a person building for an hour takes one. */
+    /**
+     * A pause between stretches of work. Not a freeze: the aim drifts the whole
+     * time, and every so often it settles on somewhere new to look, the way
+     * someone standing back to survey their work does.
+     */
     private void handleRest(ClientPlayerEntity player) {
-        if (config.lookAroundOnBreak && waitTicks % 20 == 0) {
-            look = motion.stepLook(look, player.getYaw() + (float) (Math.random() * 120 - 60), 0f);
-            player.setYaw(look.yaw());
-            player.setPitch(look.pitch());
+        if (config.lookAroundOnBreak) {
+            if (restGazeTarget == null || waitTicks % 60 == 0) {
+                restGazeTarget = motion.wanderTarget(look);
+            }
+            look = motion.stepLook(look, restGazeTarget.yaw(), restGazeTarget.pitch());
+        } else {
+            look = motion.idleDrift(look);
         }
+        player.setYaw(look.yaw());
+        player.setPitch(look.pitch());
+
         if (waitTicks-- <= 0) {
+            restGazeTarget = null;
             step = Step.NAVIGATE;
         }
     }
@@ -427,6 +446,12 @@ public class BuildExecutor {
         advance(false);
     }
 
+    /** Blocks until the next break, spread +/-35% around the configured interval. */
+    private int jitteredBreakInterval() {
+        double jittered = config.breakEveryBlocks * (0.65 + Math.random() * 0.7);
+        return Math.max(8, (int) Math.round(jittered));
+    }
+
     /** How many more of this item the rest of the plan calls for. */
     private int remainingNeedFor(Item item) {
         int count = 0;
@@ -454,13 +479,49 @@ public class BuildExecutor {
                 .add(face.getOffsetX() * 0.5, face.getOffsetY() * 0.5, face.getOffsetZ() * 0.5);
         BlockHitResult hit = new BlockHitResult(hitPos, face, bp.supportNeighbor(), false);
         client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+        player.swingHand(Hand.MAIN_HAND);
         placedCount++;
+        motion.noteAction();
+
+        // Often look ahead to where the next block goes while the hands catch up.
+        glanceTarget = null;
+        if (motion.shouldGlanceAhead() && placementIndex + 1 < plan.order().size()) {
+            glanceTarget = aimAt(player, plan.order().get(placementIndex + 1).pos());
+        }
+
         waitTicks = motion.dwellTicks();
         step = Step.DWELL;
     }
 
-    private void handleDwell() {
-        if (waitTicks-- <= 0) advance(true);
+    /**
+     * The beat after placing a block. Rather than staring at the block just
+     * placed, the aim often drifts toward wherever the next one goes -- people
+     * look where they're about to work before they get there.
+     */
+    private void handleDwell(ClientPlayerEntity player) {
+        if (glanceTarget != null) {
+            look = motion.stepLook(look, glanceTarget.yaw(), glanceTarget.pitch());
+        } else {
+            look = motion.idleDrift(look);
+        }
+        player.setYaw(look.yaw());
+        player.setPitch(look.pitch());
+
+        if (waitTicks-- <= 0) {
+            glanceTarget = null;
+            advance(true);
+        }
+    }
+
+    /** Aim that would look at the next planned block, for the anticipatory glance. */
+    private HumanMotion.LookState aimAt(ClientPlayerEntity player, BlockPos target) {
+        Vec3d eye = player.getEyePos();
+        Vec3d center = Vec3d.ofCenter(target);
+        double dx = center.x - eye.x, dy = center.y - eye.y, dz = center.z - eye.z;
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+        return new HumanMotion.LookState(
+                (float) Math.toDegrees(Math.atan2(dz, dx)) - 90f,
+                (float) -Math.toDegrees(Math.atan2(dy, horizontal)));
     }
 
     private void advance(boolean placedOk) {
@@ -469,10 +530,14 @@ public class BuildExecutor {
         pathIndex = 0;
         step = Step.NAVIGATE;
 
-        if (placedOk && config.takeBreaks && ++blocksSinceBreak >= config.breakEveryBlocks) {
+        if (placedOk && config.takeBreaks && ++blocksSinceBreak >= nextBreakAt) {
             blocksSinceBreak = 0;
-            waitTicks = config.breakSeconds * 20;
-            statusMessage = "taking a " + config.breakSeconds + "s break";
+            // Jitter the interval too -- breaks landing on exactly every Nth
+            // block would be as telling as a fixed break length.
+            nextBreakAt = jitteredBreakInterval();
+            waitTicks = motion.breakTicks(config.breakSeconds);
+            restGazeTarget = null;
+            statusMessage = "taking a break (" + (waitTicks / 20) + "s)";
             resetInputs();
             step = Step.REST;
             return;
@@ -489,10 +554,26 @@ public class BuildExecutor {
         Vec3d targetCenter = Vec3d.ofBottomCenter(target);
         double dx = targetCenter.x - player.getX(), dz = targetCenter.z - player.getZ();
         float targetYaw = (float) Math.toDegrees(Math.atan2(dz, dx)) - 90f;
-        look = motion.stepLook(look, targetYaw, Math.max(-20f, look.pitch()));
+
+        // Glance around occasionally while walking rather than staring at the
+        // destination the whole way. The gaze returns on its own next tick,
+        // since the walk target keeps pulling the aim back.
+        if (walkGaze != null) {
+            look = motion.stepLook(look, walkGaze.yaw(), walkGaze.pitch());
+            if (--walkGazeTicks <= 0) walkGaze = null;
+        } else {
+            if (motion.shouldScanSurroundings()) {
+                walkGaze = motion.wanderTarget(look);
+                walkGazeTicks = 10 + (int) (Math.random() * 20);
+            }
+            look = motion.stepLook(look, targetYaw, Math.max(-25f, Math.min(15f, look.pitch())));
+        }
         player.setYaw(look.yaw());
         player.setPitch(look.pitch());
-        client.options.forwardKey.setPressed(true);
+
+        // Gait isn't perfectly even -- the odd tick of easing off the key reads
+        // as a person walking rather than a held-down input.
+        client.options.forwardKey.setPressed(!motion.shouldEaseOffThrottle());
         client.options.sprintKey.setPressed(config.allowSprint);
     }
 
