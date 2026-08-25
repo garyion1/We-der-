@@ -1,135 +1,147 @@
 # Auto Litematica Builder
 
-A Fabric client mod for Minecraft 1.21.11 that builds a loaded `.litematic` schematic
-itself: plans a sensible placement order, walks/pearl-climbs to each spot, restocks
-missing materials (optionally by shopping a server's `/ah`), and places blocks with
-human-paced, human-shaped input instead of instant/robotic actions.
+A Fabric client mod for **Minecraft 1.21.11** that builds a `.litematic` schematic
+for you: it plans a placement order, walks (and pearl-climbs) to each spot,
+restocks missing materials from the server's auction house, and places blocks
+with human-paced, human-shaped input instead of instant robotic actions.
 
-Press **`'`** (apostrophe) in-game to open the build menu.
+Press **`[`** in game to open the menu.
 
-## Before you turn this on somewhere that matters
+---
 
-This automates real gameplay: movement, block placement, and (if you enable it)
-purchases against a live in-game economy. Read this before you use it anywhere but
-singleplayer:
+## Status: builds, but has never been run
 
-- **Most multiplayer servers' rules prohibit macro/bot play**, including
-  auto-builders and auto-buyers, whether or not the server has active anti-cheat.
-  Using this on a server you don't own/administer without checking its rules risks
-  a ban. That's on you to check, not something this README can clear for you.
-- **`autoBuyMaterials` is off by default** (`BuilderConfig.autoBuyMaterials`) for
-  exactly that reason — it sends real purchase commands against a real economy.
-  Only turn it on somewhere you've confirmed automation is allowed.
-- The "human-paced" motion (`nav/HumanMotion.java`) exists to make the build look
-  natural rather than robotic — randomized timing and eased look/turn speed instead
-  of instant snapping. It is not designed to fingerprint or specifically evade any
-  named anti-cheat's detection; if a server's anti-cheat flags it, that's the
-  server correctly doing its job.
+Every commit here is compiled against real 1.21.11 mappings by CI, so it
+compiles and packages into a loadable jar. **Nobody has ever launched it.** No
+block has been placed, no path walked, no purchase made. Treat it as a first
+draft that happens to compile.
 
-## How it fits together
+Try it in **singleplayer** first.
 
-```
-schematic/RawLitematicReader.java     Parses .litematic files directly (NBT + the
-                                        bit-packed BlockStates array), independent of
-                                        Litematica being installed. Verified against
-                                        the format both Baritone's own litematica
-                                        integration and the litemapy Python library
-                                        independently reimplement.
-schematic/LitematicFileSchematicSource Wraps the reader with a chosen file + world
-                                        origin (type these into the GUI, or read them
-                                        off Litematica's own ghost-preview placement
-                                        if you use Litematica to position the build
-                                        first -- Litematica is recommended, not
-                                        required).
-planner/BuildPlanner.java             Diffs target vs. world, orders placements so
-                                        every block has a real neighbor to click
-                                        against by the time its turn comes (bottom-up
-                                        / nearest-first / outside-in / scaffold-aware
-                                        strategies), and tallies materials needed.
-nav/HumanMotion.java                  Timing + look-easing helpers: randomized
-                                        dwell/reaction delays, eased turning with
-                                        slight overshoot, occasional hesitation.
-nav/PathFinder.java                   Grid A* with an extra pearl-climb edge type,
-                                        used only when there's no walkable route up.
-economy/AuctionHouseBuyer.java        Sends the shop command, scans the resulting
-                                        GUI's item lore for a price via a configurable
-                                        regex, buys the cheapest listing under your
-                                        price cap. Entirely server-specific -- tune
-                                        BuilderConfig.auctionPriceRegex /
-                                        auctionRequiresConfirmClick to match your
-                                        server's actual /ah GUI.
-exec/BuildExecutor.java               The tick-driven state machine tying all of the
-                                        above together: plan -> navigate -> align ->
-                                        get item (buy if needed) -> place -> dwell ->
-                                        repeat.
-gui/BuildOptionsScreen.java           The ' menu: pick strategy/pace, toggle pearls
-                                        and auto-buy, start/pause/stop.
-```
+## Before using it on a server
 
-## Building
+- **Most servers' rules prohibit automation** — auto-builders, macros, and
+  auto-buyers alike — whether or not anti-cheat catches them. Checking your
+  server's rules is on you.
+- **Auto-buying is off by default** (`Buying` tab) because it spends real
+  in-game currency with nobody watching.
+- The human-like motion makes the builder *look* natural rather than robotic.
+  It is **not** designed against any particular anti-cheat and spoofs nothing.
+  A server inspecting packets, or simply noticing an account building for nine
+  hours, is unaffected by it.
 
-**This has never been compiled.** It was written in an environment whose network
-policy blocks `maven.fabricmc.net`, `libraries.minecraft.net` and
-`piston-meta.mojang.com`, so Loom could never resolve Minecraft to compile against.
-Everything below the Gradle config is therefore unverified against a real compiler --
-expect to fix things. See "Expect to fix" below.
+---
 
-Requirements: **JDK 21** (not 22+ -- Loom targets 21 for this MC version).
+## The menu (`[`)
+
+| Tab | Contains |
+|---|---|
+| **Build** | schematic file, origin, order (6 modes), layer direction, scaffold block, break wrong blocks, skip fluids / block entities, verify pass, retries |
+| **Move** | pearl climbing + reserve, jumping, sprint, max fall, reach, pathfinding effort, sneak near edges, avoid hazards, return home |
+| **Timing** | pace, delay scale, randomness, fatigue, breaks (on/interval/length/look around) |
+| **Buying** | auto-buy, `/ah` command, price regex, price limits, page scanning, confirm click, buy extra, out-of-materials policy |
+| **Safety** | health floor, hunger floor, player-nearby, inventory full, time limit, consecutive-failure cutoff |
+| **Status** | live state, progress, skipped count, fatigue — and the approve/decline buttons for an expensive purchase |
+
+### Build orders
+
+- **Layer by layer** — bottom-up (or top-down), nearest-first within a layer.
+- **Nearest block first** — least walking.
+- **Shell first** — outer surfaces, then the interior.
+- **Layers + auto-scaffold** — drops temporary support columns under floating
+  sections so they can be reached.
+- **One material at a time** — works through a single block type before moving
+  on. Keeps the hotbar stable.
+- **Random** — unstructured fill.
+
+### Setting up `/ah` for your server
+
+This is the part most likely to need tuning, because every server's auction GUI
+differs. Open `/ah` by hand first and look at how a listing shows its price:
+
+- Default pattern `\$\s*([0-9][0-9,.]*)` matches `$1,234`.
+- `Price: 1234 coins` → use `Price: ([0-9,.]+)`.
+- Group 1 must be the number. Price is compared **per item**, so a 64-stack at
+  320,000 counts as 5,000 each.
+
+Then: if buying takes two clicks on your server, turn on **Needs confirm click**.
+
+**Price limits** are two separate numbers:
+- *Buy without asking under* (default 100,000/item) — spent unattended.
+- *Never buy over* (default 5,000,000) — refused outright, always.
+- Between the two, the build pauses and waits for you to approve on the Status
+  tab. A listing whose price can't be parsed is never bought — unreadable
+  counts as too expensive, not as free.
+
+With **Check every page** on, it surveys every page of results, then re-runs
+the search and pages back to whichever page held the cheapest listing before
+buying. (Only the page on screen is clickable, which is why it needs two
+passes.)
+
+---
+
+## Building the jar
+
+CI builds it on every push — grab the artifact from the
+[Actions tab](https://github.com/garyion1/We-der-/actions) rather than building
+locally if you just want the jar.
+
+To build it yourself you need **JDK 21**:
 
 ```bash
 cd mod
 ./gradlew build
 ```
 
-The Gradle wrapper is included, pinning **Gradle 9.2** -- use `./gradlew` rather
-than a system `gradle`, so the version is guaranteed. Loom 1.14 publishes only a
-Gradle 9.2 variant and fails to resolve on Gradle 8.x with a "no matching variant
-... org.gradle.plugin.api-version" error.
+Output lands in `build/libs/`. Use `./gradlew`, not a system `gradle`: the
+wrapper pins Gradle 9.2, and Loom 1.14 publishes only a Gradle 9.2 variant.
 
-Output jar lands in `build/libs/` (ignore the `-sources` one; the plain
-`auto-litematica-builder-0.1.0.jar` is the mod). Drop it in `.minecraft/mods/`
-alongside Fabric Loader and Fabric API.
+Versions (from Fabric's 1.21.11 release and Modrinth), in `gradle.properties`:
+Loom `1.14`, Yarn `1.21.11+build.6`, Loader `0.19.3`, Fabric API
+`0.141.1+1.21.11`. Note 1.21.11 is the **last** version Fabric ships Yarn
+mappings for; a future port means migrating to Mojang mappings, which renames
+most of the Minecraft classes this touches.
 
-Versions in `gradle.properties` are taken from Fabric's 1.21.11 release
-announcement (2025-12-05) and Modrinth's Fabric API listing:
-Loom `1.14`, Loader `0.18.1`, Fabric API `0.141.1+1.21.11`. Yarn resolves
-dynamically via `1.21.11+build.+`. Note 1.21.11 is the **last** version Fabric
-ships Yarn mappings for -- a future port means migrating this code to Mojang
-mappings (`loom.officialMojangMappings()`), which renames most of the Minecraft
-classes this mod touches.
+## Installing
 
-### Expect to fix
+1. [Fabric Loader](https://fabricmc.net/use/installer/) for 1.21.11
+2. [Fabric API](https://modrinth.com/mod/fabric-api) in `mods/`
+3. This jar in `mods/`
+4. Litematica is *recommended, not required* — useful for previewing and
+   positioning a build. This mod reads `.litematic` files itself.
 
-Roughly in descending order of how likely they are to break:
+---
 
-1. `economy/AuctionHouseBuyer.java` -- `DataComponentTypes.LORE` and
-   `GenericContainerScreen`. The item-component API landed in 1.20.5 and has moved
-   since; this is the least certain file in the project.
-2. `exec/BuildExecutor.java` -- the largest surface area of Minecraft API calls
-   (`interactionManager`, `getInventory().selectedSlot`, key-binding presses).
-   `selectedSlot` in particular became a method rather than a field at some point.
-3. `gui/BuildOptionsScreen.java` -- widget builder signatures shift between releases.
+## How it fits together
 
-The parts *not* in that list -- `RawLitematicReader`, `BuildPlanner`, `PathFinder`,
-`HumanMotion` -- are mostly plain Java and don't depend much on Minecraft's API
-surface, so they're the most likely to be correct as written.
+```
+schematic/RawLitematicReader      Parses .litematic (NBT + the bit-packed
+                                    BlockStates array) directly, independent of
+                                    Litematica. Format cross-checked against
+                                    Baritone's implementation and litemapy.
+planner/BuildPlanner              Diffs target vs world and orders placements so
+                                    every block has a real neighbour to click
+                                    against by the time its turn comes.
+nav/PathFinder                    Grid A* with jump/drop/pearl-climb edges,
+                                    hazard-aware, fall-height limited.
+nav/HumanMotion                   Aim easing, tremor, overshoot, fatigue, and
+                                    all the timing distributions.
+economy/AuctionHouseBuyer         Two-pass cheapest-listing search, price limits,
+                                    approval flow.
+exec/BuildExecutor                The tick state machine tying it together:
+                                    navigate -> align -> get item -> break ->
+                                    place -> verify -> dwell -> rest.
+gui/BuildOptionsScreen            The [ menu.
+```
 
-Install Litematica (recommended, not required) to preview and position builds
-before running this against them.
+## Known limitations
 
-## Known limitations / not yet handled
-
-- Chests, signs, and other block entities: the schematic reader only places block
-  *shapes*, not container contents or sign text (`Entities`/`TileEntities` in the
-  `.litematic` NBT aren't read yet).
-- Non-`SCAFFOLD_AWARE` strategies don't build temporary scaffolding under floating
-  sections -- an unsupported block gets flagged as skipped rather than placed.
-- Pearl-climb aiming (`BuildExecutor.solvePearlPitch`) is a numerically-simulated
-  approximation of pearl physics (constant speed/gravity/drag), not exact server
-  physics -- expect to tune it against real in-game throws.
-- No persistence yet for `BuilderConfig` -- settings reset each launch. Wire up
-  malilib's JSON config helpers (if you're depending on it) or a small Gson file
-  in `BuilderConfig` if you want them to stick.
-- The planner is a greedy O(n²) nearest-neighbor pass -- fine for a house, will get
-  slow on schematics in the tens of thousands of blocks; add a spatial index
-  (e.g. bucket by chunk) if you build something that large.
+- **Block entities are placed empty.** Chest contents and sign text aren't read
+  from the schematic (`Entities`/`TileEntities` are skipped). There's a toggle
+  to leave them out entirely.
+- **Pearl aiming is approximate** — simulated physics (constant speed, gravity,
+  drag) that won't exactly match server behaviour. Expect to tune it.
+- **No config persistence.** Settings reset each launch.
+- **The planner is O(n²)** — fine for a house, slow for tens of thousands of
+  blocks. Needs a spatial index for very large schematics.
+- **Block-entity rotation/state** beyond basic block properties is untested.
