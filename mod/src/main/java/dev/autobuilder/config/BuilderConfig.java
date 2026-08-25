@@ -204,6 +204,45 @@ public class BuilderConfig {
     /** Stop rather than carry on if this many placements in a row fail. */
     public int stopAfterConsecutiveFailures = 25;
 
+    // ================================================================ server mode
+
+    public enum ServerPreset {
+        NORMAL("Normal (Survival)"),
+        CREATIVE("Creative Mode"),
+        DONUT_SMP("DonutSMP");
+
+        public final String label;
+        ServerPreset(String label) { this.label = label; }
+    }
+
+    /**
+     * Server / game mode you're playing on.
+     * CREATIVE: fills the hotbar automatically rather than buying from /ah.
+     * DONUT_SMP: tunes timing, disables features that flag Donut's anti-cheat.
+     */
+    public ServerPreset serverPreset = ServerPreset.NORMAL;
+
+    /** Apply the recommended defaults for the chosen preset (called from the GUI). */
+    public void applyPreset(ServerPreset preset) {
+        this.serverPreset = preset;
+        switch (preset) {
+            case CREATIVE -> {
+                autoBuyMaterials = false;
+            }
+            case DONUT_SMP -> {
+                allowSprint = false;
+                usePearlClimbing = false;
+                pace = Pace.CAREFUL;
+                takeBreaks = true;
+                simulateFatigue = true;
+                avoidHazards = true;
+                jitterPercent = 120;
+                stopOnPlayerNearby = true;
+            }
+            default -> {}
+        }
+    }
+
     // ================================================================ persistence
 
     /** Remember these settings between launches. */

@@ -429,7 +429,7 @@ public class BuildExecutor {
 
     private void handleNavigate(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (path.isEmpty() && pathIndex == 0) {
-            BlockPos standGoal = computeStandPosition(bp);
+            BlockPos standGoal = computeStandPosition(client, player, bp);
             path = buildPath(client, player, standGoal, true);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
@@ -561,7 +561,7 @@ public class BuildExecutor {
         return false;
     }
 
-    private BlockPos computeStandPosition(BlockPlacement bp) {
+    private BlockPos computeStandPosition(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (bp.supportNeighbor() == null || bp.isRemoval()) return bp.pos().down();
         Direction face = bp.clickFace();
         if (face == null) return bp.pos().down();
@@ -569,23 +569,44 @@ public class BuildExecutor {
         // NEVER return bp.pos() -- the bot would be standing inside the target block,
         // and the server rejects block placement when it collides with the player.
 
-        if (face == Direction.UP) {
-            // Placing on top: support is directly below target.
-            // Stand 1 block north of target at the same Y. In a bottom-up build the
-            // layer below (target.Y-1) is already solid everywhere, so target.north().down()
-            // is a solid floor block -- this position is always standable.
-            return bp.pos().north();
-        }
         if (face == Direction.DOWN) {
             // Placing on ceiling: support is directly above target.
-            // Stand 2 below the target, look up. feet.down() = target.down(3) may or
-            // may not be solid, but if the structure has any floor below us this works.
+            // Stand 2 below the target, look up.
             return bp.pos().down(2);
         }
-        // Horizontal face: support is to one side of the target.
-        // Stand 1 block past the target in the click direction so we are neither
-        // inside the target nor inside the support, and can reach back to click.
-        return bp.pos().offset(face);
+        if (face == Direction.UP) {
+            // Placing on top: support is directly below target. Any of the four
+            // horizontal neighbours (at target's Y) works, since the layer below
+            // is already solid there in a bottom-up build. Pick whichever is
+            // actually standable and closest to the player right now, instead of
+            // blindly walking north -- that's what sent the bot away from builds
+            // that face south/east/west.
+            return closestStandableNeighbor(client, player, bp.pos(), bp.pos().north());
+        }
+        // Horizontal face: support is to one side of the target. Standing one
+        // block past the target in the click direction is the natural spot, but
+        // fall back to the nearest standable neighbour if that spot is blocked.
+        BlockPos primary = bp.pos().offset(face);
+        if (isStandable(client, primary)) return primary;
+        return closestStandableNeighbor(client, player, bp.pos(), primary);
+    }
+
+    /** Nearest standable position (to the player) among the four horizontal neighbours of pos. */
+    private BlockPos closestStandableNeighbor(MinecraftClient client, ClientPlayerEntity player,
+                                               BlockPos pos, BlockPos fallback) {
+        BlockPos playerPos = player.getBlockPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (Direction d : Direction.Type.HORIZONTAL) {
+            BlockPos candidate = pos.offset(d);
+            if (!isStandable(client, candidate)) continue;
+            double dist = playerPos.getSquaredDistance(candidate.getX(), candidate.getY(), candidate.getZ());
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = candidate;
+            }
+        }
+        return best != null ? best : fallback;
     }
 
     private boolean isStandable(MinecraftClient client, BlockPos feet) {
@@ -740,7 +761,7 @@ public class BuildExecutor {
 
         // Creative mode: just put the item in the active hotbar slot directly.
         // The server accepts creative inventory changes, so no purchase needed.
-        if (player.getAbilities().creativeMode) {
+        if (player.getAbilities().creativeMode || config.serverPreset == BuilderConfig.ServerPreset.CREATIVE) {
             int slot = player.getInventory().getSelectedSlot();
             player.getInventory().setStack(slot, new ItemStack(needed, 64));
             selectHotbarSlot(player, slot);

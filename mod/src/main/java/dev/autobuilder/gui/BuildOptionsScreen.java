@@ -221,6 +221,10 @@ public class BuildOptionsScreen extends Screen {
     // ---------------------------------------------------------------- tabs
 
     private void buildTab() {
+        head("Server");
+        cycler("Mode", BuilderConfig.ServerPreset.values(),
+                () -> config.serverPreset, config::applyPreset, v -> v.label);
+
         // No file picker, no coordinates: the Build tab just shows what
         // LitematicaSync currently found. Place and position the schematic in
         // Litematica itself and this follows it -- the status line is drawn
