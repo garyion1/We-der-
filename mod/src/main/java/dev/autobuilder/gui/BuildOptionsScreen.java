@@ -7,8 +7,6 @@ import dev.autobuilder.schematic.LitematicFileSchematicSource;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.ButtonWidget;
-import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.item.Item;
 import net.minecraft.text.Text;
@@ -16,6 +14,7 @@ import net.minecraft.text.Text;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -23,64 +22,76 @@ import java.util.function.Supplier;
 /**
  * The build options menu, opened with [.
  *
- * Seven tabs, because there are far more options than fit on a page. Switching
- * tabs re-opens the screen carrying the tab index, rather than relying on a
- * re-init method whose name varies between versions.
- *
- * Built from ButtonWidget and TextFieldWidget only. The fancier widgets
- * (CyclingButtonWidget, scroll panes) have version-sensitive signatures that
- * aren't worth the breakage, and a cycling button is one click either way.
+ * Deliberately not built from vanilla ButtonWidget: this is a flat, self-drawn
+ * settings list (label left, value/switch right, hover highlight, no stone-gray
+ * bevel) rather than a row of chiseled Minecraft buttons. Every row is data --
+ * a label, a live value Supplier, and a click action -- collected in init(),
+ * measured to fit whatever height is actually available, then both drawn and
+ * hit-tested from that same list. Screen.mouseClicked is the only interaction
+ * surface used beyond that (plus real TextFieldWidgets for the few free-text
+ * settings), since it has been stable for a decade and needs no version-guessing.
  */
 public class BuildOptionsScreen extends Screen {
 
     private static final String[] TABS = {"Build", "Move", "Timing", "Buying", "Safety", "Items", "Status"};
 
-    private static final int PANEL_W = 310;
-    private static final int ROW_H = 21;
-    private static final int TAB_H = 18;
+    private static final int PANEL_W = 312;
+    private static final int ROW_H = 22;
+    private static final int TAB_H = 20;
     private static final int MIN_ROW_H = 13;
     private static final int MIN_WIDGET_H = 12;
 
-    private static final int TITLE = 0xFFFFFF;
-    private static final int HEADER = 0xFFD68A;
-    private static final int MUTED = 0x9A9A9A;
-    private static final int GOOD = 0x8FCF8F;
-    private static final int WARN = 0xE8C07A;
-    private static final int BAD = 0xE87A7A;
-    private static final int PANEL_BG = 0xB0101014;
-    private static final int PANEL_EDGE = 0x40FFFFFF;
+    // Flat dark palette -- no vanilla stone-gray/gold, just a small set of
+    // neutrals plus one accent color and three semantic status colors.
+    private static final int BG_PANEL = 0xF0121620;
+    private static final int ACCENT_LINE = 0xFF3E5A8C;
+    private static final int BG_FIELD = 0xFF1B212C;
+    private static final int HOVER_BG = 0x18FFFFFF;
+    private static final int DIVIDER = 0x14FFFFFF;
+    private static final int ACCENT = 0xFF6C9BFF;
+    private static final int TEXT_PRIMARY = 0xFFE8EAED;
+    private static final int TEXT_SECONDARY = 0xFF828A99;
+    private static final int TEXT_DIM = 0xFF565C68;
+    private static final int GOOD = 0xFF5FD68A;
+    private static final int WARN = 0xFFE8B75B;
+    private static final int BAD = 0xFFE8697A;
+    private static final int TRACK_OFF = 0xFF383E4A;
 
     private final BuilderConfig config;
     private final LitematicFileSchematicSource schematicSource;
     private final BuildExecutor executor;
     private final int tab;
 
-    /** Text-field values, pushed into config on tab change / start / close. */
     private final List<Runnable> pendingApplies = new ArrayList<>();
     private final List<Label> labels = new ArrayList<>();
-
     private record Label(int x, int y, String text, int color) {}
 
-    /**
-     * Rows are collected first and positioned afterwards, so the layout can
-     * measure how much room it actually has. Placing them as they were declared
-     * overflowed the footer and control buttons at higher GUI scales, where the
-     * usable height is barely 270px.
-     */
-    private interface RowFactory { ClickableWidget make(int x, int y, int height); }
-    /** kind: WIDGET has a factory, HEADER has header text, STATUS_LINE reserves a
-     *  row for the live Litematica status text drawn in render(). */
-    private enum RowKind { WIDGET, HEADER, STATUS_LINE }
-    private record Row(RowKind kind, String header, RowFactory factory) {}
-    private final List<Row> rows = new ArrayList<>();
-    /** Where the laid-out rows ended, so render() can put free text below them. */
-    private int contentBottom;
-    /** Where the reserved schematic-status row landed, so render() can draw into it. */
-    private int schematicStatusY = -1;
+    private enum RowKind { HEADER, OPTION, FIELD, STATUS_LINE }
+    private interface FieldFactory { TextFieldWidget make(int x, int y, int w, int h); }
+    private record Row(RowKind kind, String header, String label, Supplier<String> value,
+                       BooleanSupplier toggleState, Runnable onClick, FieldFactory fieldFactory) {}
+    private record Placed(Row row, int x, int y, int w, int h) {
+        boolean contains(double mx, double my) {
+            return mx >= x && mx < x + w && my >= y && my < y + h;
+        }
+    }
+    private enum ButtonStyle { PRIMARY, GHOST, DANGER, PLAIN }
+    private record ClickZone(int x, int y, int w, int h, String label, ButtonStyle style, Runnable action) {
+        boolean contains(double mx, double my) {
+            return mx >= x && mx < x + w && my >= y && my < y + h;
+        }
+    }
 
-    private void head(String text) { rows.add(new Row(RowKind.HEADER, text, null)); }
-    private void row(RowFactory factory) { rows.add(new Row(RowKind.WIDGET, null, factory)); }
-    private void statusLine() { rows.add(new Row(RowKind.STATUS_LINE, null, null)); }
+    private final List<Row> rows = new ArrayList<>();
+    private final List<Placed> placedOptions = new ArrayList<>();
+    private final List<ClickZone> clickZones = new ArrayList<>();
+    private final List<int[]> tabZones = new ArrayList<>(); // {x, w} per tab, for hover/underline
+    private int contentBottom;
+    private int schematicStatusY = -1;
+    private int panelLeft, panelTop;
+
+    private void head(String text) { rows.add(new Row(RowKind.HEADER, text, null, null, null, null, null)); }
+    private void statusLine() { rows.add(new Row(RowKind.STATUS_LINE, null, null, null, null, null, null)); }
 
     public BuildOptionsScreen(BuilderConfig config, LitematicFileSchematicSource source, BuildExecutor executor) {
         this(config, source, executor, 0);
@@ -99,16 +110,17 @@ public class BuildOptionsScreen extends Screen {
     protected void init() {
         pendingApplies.clear();
         labels.clear();
+        clickZones.clear();
+        tabZones.clear();
 
         int left = this.width / 2 - PANEL_W / 2;
-        int top = 30;
+        int top = 28;
+        panelLeft = left;
+        panelTop = top;
 
         int tabW = PANEL_W / TABS.length;
         for (int i = 0; i < TABS.length; i++) {
-            final int target = i;
-            addDrawableChild(ButtonWidget.builder(
-                    Text.literal(TABS[i]), b -> switchTo(target))
-                    .dimensions(left + i * tabW, top, tabW - 2, TAB_H).build());
+            tabZones.add(new int[]{left + i * tabW, tabW - 2});
         }
 
         rows.clear();
@@ -121,53 +133,44 @@ public class BuildOptionsScreen extends Screen {
             case 5 -> itemsTab();
             default -> statusTab();
         }
-        layoutRows(left, top + TAB_H + 8);
+        layoutRows(left, top + TAB_H + 10);
 
         if (tab == 6 && executor.isAwaitingPurchaseConfirmation()) {
-            int approveY = this.height - 52;
-            int halfW = PANEL_W / 2 - 2;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Approve purchase"),
-                    b -> executor.confirmPurchase()).dimensions(left, approveY, halfW, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Decline"),
-                    b -> executor.declinePurchase())
-                    .dimensions(left + PANEL_W / 2 + 2, approveY, halfW, 20).build());
+            int approveY = this.height - 54;
+            int halfW = PANEL_W / 2 - 3;
+            clickZones.add(new ClickZone(left, approveY, halfW, 20,
+                    "Approve purchase", ButtonStyle.PRIMARY, executor::confirmPurchase));
+            clickZones.add(new ClickZone(left + PANEL_W / 2 + 3, approveY, halfW, 20,
+                    "Decline", ButtonStyle.DANGER, executor::declinePurchase));
         }
 
         int controlY = this.height - 28;
-        addDrawableChild(ButtonWidget.builder(Text.literal("Start"), b -> {
+        clickZones.add(new ClickZone(left, controlY, 76, 20, "Start", ButtonStyle.PRIMARY, () -> {
             applyPending();
-            // Only close if it actually started -- previously this closed
-            // unconditionally, so a schematic that Litematica sync hadn't found
-            // yet made Start look like it did nothing at all: the menu just
-            // vanished with no error shown anywhere.
+            // Only close if it actually started -- closing unconditionally made a
+            // schematic Litematica sync hadn't found yet look like Start did
+            // nothing at all, with no explanation anywhere.
             if (schematicSource.isLoaded()) {
                 executor.start(MinecraftClient.getInstance());
                 close();
             } else {
                 AutoBuilderClient.LITEMATICA_SYNC.checkNow();
             }
-        }).dimensions(left, controlY, 76, 20).build());
-
-        addDrawableChild(ButtonWidget.builder(Text.literal("Pause"), b -> executor.pause())
-                .dimensions(left + 78, controlY, 76, 20).build());
-
-        addDrawableChild(ButtonWidget.builder(Text.literal("Stop"), b -> executor.stop())
-                .dimensions(left + 156, controlY, 76, 20).build());
-
-        addDrawableChild(ButtonWidget.builder(Text.literal("Close"), b -> close())
-                .dimensions(left + 234, controlY, 76, 20).build());
+        }));
+        clickZones.add(new ClickZone(left + 78, controlY, 76, 20, "Pause", ButtonStyle.GHOST, executor::pause));
+        clickZones.add(new ClickZone(left + 156, controlY, 76, 20, "Stop", ButtonStyle.GHOST, executor::stop));
+        clickZones.add(new ClickZone(left + 234, controlY, 76, 20, "Close", ButtonStyle.PLAIN, this::close));
     }
-
 
     /**
      * Places the collected rows, shrinking row height to fit the space actually
-     * available. At GUI scale 3 or 4 the usable height is only ~270px, and a
-     * fixed 21px row pitch pushed the last options underneath the footer and the
-     * Start/Pause/Stop buttons, where they could not be clicked.
+     * available -- at GUI scale 3-4 the usable height is barely 270px, and a
+     * fixed pitch previously pushed options underneath the footer/controls.
      */
     private void layoutRows(int x, int top) {
         schematicStatusY = -1;
-        int bottom = this.height - 46;          // clear of the footer and controls
+        placedOptions.clear();
+        int bottom = this.height - 46;
         int available = Math.max(40, bottom - top);
 
         int headers = 0, others = 0;
@@ -176,25 +179,31 @@ public class BuildOptionsScreen extends Screen {
         }
         if (headers == 0 && others == 0) return;
 
-        int headerH = 11;
+        int headerH = 14;
         int rowH = ROW_H;
         while (rowH > MIN_ROW_H && headers * headerH + others * rowH > available) rowH--;
-        if (headers * headerH + others * rowH > available) headerH = 9;
+        if (headers * headerH + others * rowH > available) headerH = 10;
 
-        int widgetH = Math.max(MIN_WIDGET_H, rowH - 1);
+        int widgetH = Math.max(MIN_WIDGET_H, rowH - 5);
         int y = top;
         for (Row row : rows) {
             switch (row.kind()) {
                 case HEADER -> {
-                    labels.add(new Label(x, y, row.header(), HEADER));
+                    labels.add(new Label(x, y, row.header(), TEXT_DIM));
                     y += headerH;
                 }
                 case STATUS_LINE -> {
                     schematicStatusY = y;
                     y += rowH;
                 }
-                case WIDGET -> {
-                    addDrawableChild(row.factory().make(x, y, widgetH));
+                case OPTION -> {
+                    placedOptions.add(new Placed(row, x, y, PANEL_W, widgetH));
+                    y += rowH;
+                }
+                case FIELD -> {
+                    TextFieldWidget widget = row.fieldFactory().make(x, y, PANEL_W, widgetH);
+                    addDrawableChild(widget);
+                    placedOptions.add(new Placed(row, x, y, PANEL_W, widgetH));
                     y += rowH;
                 }
             }
@@ -213,188 +222,154 @@ public class BuildOptionsScreen extends Screen {
     private void buildTab() {
         // No file picker, no coordinates: the Build tab just shows what
         // LitematicaSync currently found. Place and position the schematic in
-        // Litematica itself (drag it where you want it) and this follows it --
-        // the status line is drawn live in render() so it never goes stale.
+        // Litematica itself and this follows it -- the status line is drawn
+        // live in render() so it never goes stale.
         head("Schematic");
         statusLine();
 
         head("Order");
-        row((x, y, h) -> cycler(x, y, h, "Order", BuilderConfig.BuildStrategy.values(),
-                () -> config.strategy, v -> config.strategy = v, v -> v.label));
-        row((x, y, h) -> cycler(x, y, h, "Direction", BuilderConfig.LayerDirection.values(),
-                () -> config.layerDirection, v -> config.layerDirection = v, v -> v.label));
-        row((x, y, h) -> toggle(x, y, h, "Finish each layer first",
-                () -> config.strictLayers, v -> config.strictLayers = v));
-        row((x, y, h) -> cycler(x, y, h, "Scaffold", BuilderConfig.ScaffoldBlock.values(),
-                () -> config.scaffoldBlock, v -> config.scaffoldBlock = v, v -> v.label));
+        cycler("Order", BuilderConfig.BuildStrategy.values(),
+                () -> config.strategy, v -> config.strategy = v, v -> v.label);
+        cycler("Direction", BuilderConfig.LayerDirection.values(),
+                () -> config.layerDirection, v -> config.layerDirection = v, v -> v.label);
+        toggle("Finish each layer first", () -> config.strictLayers, v -> config.strictLayers = v);
+        cycler("Scaffold", BuilderConfig.ScaffoldBlock.values(),
+                () -> config.scaffoldBlock, v -> config.scaffoldBlock = v, v -> v.label);
 
         head("Matching the schematic");
-        row((x, y, h) -> toggle(x, y, h, "Require exact block match",
-                () -> config.strictBlockMatch, v -> config.strictBlockMatch = v));
-        row((x, y, h) -> toggle(x, y, h, "Break wrong blocks",
-                () -> config.breakWrongBlocks, v -> config.breakWrongBlocks = v));
-        row((x, y, h) -> toggle(x, y, h, "Remove extra blocks",
-                () -> config.removeExtraBlocks, v -> config.removeExtraBlocks = v));
-        row((x, y, h) -> toggle(x, y, h, "Verify pass at end",
-                () -> config.verifyPass, v -> config.verifyPass = v));
-        row((x, y, h) -> toggle(x, y, h, "Re-check while building",
-                () -> config.continuousVerify, v -> config.continuousVerify = v));
+        toggle("Require exact block match", () -> config.strictBlockMatch, v -> config.strictBlockMatch = v);
+        toggle("Break wrong blocks", () -> config.breakWrongBlocks, v -> config.breakWrongBlocks = v);
+        toggle("Remove extra blocks", () -> config.removeExtraBlocks, v -> config.removeExtraBlocks = v);
+        toggle("Verify pass at end", () -> config.verifyPass, v -> config.verifyPass = v);
+        toggle("Re-check while building", () -> config.continuousVerify, v -> config.continuousVerify = v);
     }
 
     private void moveTab() {
         head("Traversal");
-        row((x, y, h) -> toggle(x, y, h, "Pearl climbing",
-                () -> config.usePearlClimbing, v -> config.usePearlClimbing = v));
-        row((x, y, h) -> cycler(x, y, h, "Pearl reserve", new Integer[]{0, 2, 4, 8, 16},
-                () -> config.pearlReserve, v -> config.pearlReserve = v, String::valueOf));
-        row((x, y, h) -> toggle(x, y, h, "Allow jumping",
-                () -> config.allowJump, v -> config.allowJump = v));
-        row((x, y, h) -> toggle(x, y, h, "Sprint", () -> config.allowSprint, v -> config.allowSprint = v));
-        row((x, y, h) -> cycler(x, y, h, "Max fall", new Integer[]{0, 2, 3, 5, 10},
-                () -> config.maxFallDistance, v -> config.maxFallDistance = v, v -> v + " blocks"));
+        toggle("Pearl climbing", () -> config.usePearlClimbing, v -> config.usePearlClimbing = v);
+        cycler("Pearl reserve", new Integer[]{0, 2, 4, 8, 16},
+                () -> config.pearlReserve, v -> config.pearlReserve = v, String::valueOf);
+        toggle("Allow jumping", () -> config.allowJump, v -> config.allowJump = v);
+        toggle("Sprint", () -> config.allowSprint, v -> config.allowSprint = v);
+        cycler("Max fall", new Integer[]{0, 2, 3, 5, 10},
+                () -> config.maxFallDistance, v -> config.maxFallDistance = v, v -> v + " blocks");
 
         head("Placement");
-        row((x, y, h) -> cycler(x, y, h, "Reach", new Double[]{3.0, 3.5, 4.0, 4.5},
-                () -> config.maxReach, v -> config.maxReach = v, v -> v + " blocks"));
-        row((x, y, h) -> cycler(x, y, h, "Pathfinding effort", new Integer[]{2000, 4000, 8000, 16000},
-                () -> config.maxPathNodes, v -> config.maxPathNodes = v, String::valueOf));
+        cycler("Reach", new Double[]{3.0, 3.5, 4.0, 4.5},
+                () -> config.maxReach, v -> config.maxReach = v, v -> v + " blocks");
+        cycler("Pathfinding effort", new Integer[]{2000, 4000, 8000, 16000},
+                () -> config.maxPathNodes, v -> config.maxPathNodes = v, String::valueOf);
 
         head("Care");
-        row((x, y, h) -> toggle(x, y, h, "Sneak near edges",
-                () -> config.sneakNearEdges, v -> config.sneakNearEdges = v));
-        row((x, y, h) -> toggle(x, y, h, "Avoid lava and fire",
-                () -> config.avoidHazards, v -> config.avoidHazards = v));
-        row((x, y, h) -> toggle(x, y, h, "Return to start when done",
-                () -> config.returnHomeWhenDone, v -> config.returnHomeWhenDone = v));
+        toggle("Sneak near edges", () -> config.sneakNearEdges, v -> config.sneakNearEdges = v);
+        toggle("Avoid lava and fire", () -> config.avoidHazards, v -> config.avoidHazards = v);
+        toggle("Return to start when done", () -> config.returnHomeWhenDone, v -> config.returnHomeWhenDone = v);
     }
 
     private void timingTab() {
         head("Speed");
-        row((x, y, h) -> cycler(x, y, h, "Pace", BuilderConfig.Pace.values(),
-                () -> config.pace, v -> config.pace = v, Enum::name));
-        row((x, y, h) -> cycler(x, y, h, "Delay scale", new Integer[]{50, 75, 100, 150, 200, 300},
-                () -> config.speedPercent, v -> config.speedPercent = v, v -> v + "%"));
-        row((x, y, h) -> cycler(x, y, h, "Randomness", new Integer[]{0, 50, 100, 150, 250},
-                () -> config.jitterPercent, v -> config.jitterPercent = v, v -> v + "%"));
-        row((x, y, h) -> toggle(x, y, h, "Tire out over time",
-                () -> config.simulateFatigue, v -> config.simulateFatigue = v));
+        cycler("Pace", BuilderConfig.Pace.values(), () -> config.pace, v -> config.pace = v, Enum::name);
+        cycler("Delay scale", new Integer[]{50, 75, 100, 150, 200, 300},
+                () -> config.speedPercent, v -> config.speedPercent = v, v -> v + "%");
+        cycler("Randomness", new Integer[]{0, 50, 100, 150, 250},
+                () -> config.jitterPercent, v -> config.jitterPercent = v, v -> v + "%");
+        toggle("Tire out over time", () -> config.simulateFatigue, v -> config.simulateFatigue = v);
 
         head("Breaks");
-        row((x, y, h) -> toggle(x, y, h, "Take breaks",
-                () -> config.takeBreaks, v -> config.takeBreaks = v));
-        row((x, y, h) -> cycler(x, y, h, "Break every", new Integer[]{32, 64, 128, 256, 512},
-                () -> config.breakEveryBlocks, v -> config.breakEveryBlocks = v, v -> v + " blocks"));
-        row((x, y, h) -> cycler(x, y, h, "Break length", new Integer[]{5, 15, 30, 60, 120, 300},
-                () -> config.breakSeconds, v -> config.breakSeconds = v, v -> v + "s"));
-        row((x, y, h) -> toggle(x, y, h, "Look around on breaks",
-                () -> config.lookAroundOnBreak, v -> config.lookAroundOnBreak = v));
+        toggle("Take breaks", () -> config.takeBreaks, v -> config.takeBreaks = v);
+        cycler("Break every", new Integer[]{32, 64, 128, 256, 512},
+                () -> config.breakEveryBlocks, v -> config.breakEveryBlocks = v, v -> v + " blocks");
+        cycler("Break length", new Integer[]{5, 15, 30, 60, 120, 300},
+                () -> config.breakSeconds, v -> config.breakSeconds = v, v -> v + "s");
+        toggle("Look around on breaks", () -> config.lookAroundOnBreak, v -> config.lookAroundOnBreak = v);
     }
 
     private void buyingTab() {
         head("Auction house");
-        row((x, y, h) -> toggle(x, y, h, "Buy missing materials",
-                () -> config.autoBuyMaterials, v -> config.autoBuyMaterials = v));
-        row((x, y, h) -> field(x, y, h, "Command (%s = item)", config.auctionCommandTemplate,
-                v -> { if (!v.isBlank()) config.auctionCommandTemplate = v; }));
-        row((x, y, h) -> field(x, y, h, "Price regex (group 1 = price)", config.auctionPriceRegex,
-                v -> { if (!v.isBlank()) config.auctionPriceRegex = v; }));
+        toggle("Buy missing materials", () -> config.autoBuyMaterials, v -> config.autoBuyMaterials = v);
+        field("Command (%s = item)", config.auctionCommandTemplate,
+                v -> { if (!v.isBlank()) config.auctionCommandTemplate = v; });
+        field("Price regex (group 1 = price)", config.auctionPriceRegex,
+                v -> { if (!v.isBlank()) config.auctionPriceRegex = v; });
 
         head("Price limits (per item)");
-        row((x, y, h) -> field(x, y, h, "Buy without asking under",
-                String.format("%.0f", config.autoBuyLimit),
-                v -> config.autoBuyLimit = parseDouble(v, config.autoBuyLimit)));
-        row((x, y, h) -> field(x, y, h, "Never buy over",
-                String.format("%.0f", config.hardMaxPrice),
-                v -> config.hardMaxPrice = parseDouble(v, config.hardMaxPrice)));
-        row((x, y, h) -> toggle(x, y, h, "Ask before expensive buys",
-                () -> config.confirmExpensivePurchases, v -> config.confirmExpensivePurchases = v));
+        field("Buy without asking under", String.format("%.0f", config.autoBuyLimit),
+                v -> config.autoBuyLimit = parseDouble(v, config.autoBuyLimit));
+        field("Never buy over", String.format("%.0f", config.hardMaxPrice),
+                v -> config.hardMaxPrice = parseDouble(v, config.hardMaxPrice));
+        toggle("Ask before expensive buys",
+                () -> config.confirmExpensivePurchases, v -> config.confirmExpensivePurchases = v);
 
         head("Behaviour");
-        row((x, y, h) -> toggle(x, y, h, "Check every page for cheapest",
-                () -> config.scanAllPages, v -> config.scanAllPages = v));
-        row((x, y, h) -> cycler(x, y, h, "Max pages", new Integer[]{1, 3, 5, 10},
-                () -> config.maxAuctionPages, v -> config.maxAuctionPages = v, String::valueOf));
-        row((x, y, h) -> toggle(x, y, h, "Needs confirm click",
-                () -> config.auctionRequiresConfirmClick, v -> config.auctionRequiresConfirmClick = v));
-        row((x, y, h) -> cycler(x, y, h, "Buy extra", new Integer[]{0, 10, 25, 50},
-                () -> config.buyExtraPercent, v -> config.buyExtraPercent = v, v -> v + "%"));
-        row((x, y, h) -> cycler(x, y, h, "If unavailable", BuilderConfig.OutOfMaterialsPolicy.values(),
-                () -> config.outOfMaterials, v -> config.outOfMaterials = v, v -> v.label));
+        toggle("Check every page for cheapest", () -> config.scanAllPages, v -> config.scanAllPages = v);
+        cycler("Max pages", new Integer[]{1, 3, 5, 10},
+                () -> config.maxAuctionPages, v -> config.maxAuctionPages = v, String::valueOf);
+        toggle("Needs confirm click",
+                () -> config.auctionRequiresConfirmClick, v -> config.auctionRequiresConfirmClick = v);
+        cycler("Buy extra", new Integer[]{0, 10, 25, 50},
+                () -> config.buyExtraPercent, v -> config.buyExtraPercent = v, v -> v + "%");
+        cycler("If unavailable", BuilderConfig.OutOfMaterialsPolicy.values(),
+                () -> config.outOfMaterials, v -> config.outOfMaterials = v, v -> v.label);
     }
 
     private void safetyTab() {
         head("Stop conditions");
-        row((x, y, h) -> toggle(x, y, h, "Stop on low health",
-                () -> config.stopOnLowHealth, v -> config.stopOnLowHealth = v));
-        row((x, y, h) -> cycler(x, y, h, "Health floor", new Integer[]{4, 6, 10, 14},
-                () -> config.lowHealthThreshold, v -> config.lowHealthThreshold = v,
-                v -> (v / 2.0) + " hearts"));
-        row((x, y, h) -> toggle(x, y, h, "Stop on low hunger",
-                () -> config.stopOnLowHunger, v -> config.stopOnLowHunger = v));
-        row((x, y, h) -> toggle(x, y, h, "Stop if player nearby",
-                () -> config.stopOnPlayerNearby, v -> config.stopOnPlayerNearby = v));
-        row((x, y, h) -> cycler(x, y, h, "Player radius", new Integer[]{16, 32, 64, 128},
-                () -> config.stopOnPlayerRadius, v -> config.stopOnPlayerRadius = v, v -> v + " blocks"));
-        row((x, y, h) -> toggle(x, y, h, "Stop when inventory full",
-                () -> config.stopWhenInventoryFull, v -> config.stopWhenInventoryFull = v));
-        row((x, y, h) -> cycler(x, y, h, "Time limit", new Integer[]{0, 15, 30, 60, 120, 480},
-                () -> config.maxBuildMinutes, v -> config.maxBuildMinutes = v,
-                v -> v == 0 ? "none" : v + " min"));
+        toggle("Stop on low health", () -> config.stopOnLowHealth, v -> config.stopOnLowHealth = v);
+        cycler("Health floor", new Integer[]{4, 6, 10, 14},
+                () -> config.lowHealthThreshold, v -> config.lowHealthThreshold = v, v -> (v / 2.0) + " hearts");
+        toggle("Stop on low hunger", () -> config.stopOnLowHunger, v -> config.stopOnLowHunger = v);
+        toggle("Stop if player nearby", () -> config.stopOnPlayerNearby, v -> config.stopOnPlayerNearby = v);
+        cycler("Player radius", new Integer[]{16, 32, 64, 128},
+                () -> config.stopOnPlayerRadius, v -> config.stopOnPlayerRadius = v, v -> v + " blocks");
+        toggle("Stop when inventory full",
+                () -> config.stopWhenInventoryFull, v -> config.stopWhenInventoryFull = v);
+        cycler("Time limit", new Integer[]{0, 15, 30, 60, 120, 480},
+                () -> config.maxBuildMinutes, v -> config.maxBuildMinutes = v, v -> v == 0 ? "none" : v + " min");
 
         head("Other");
-        row((x, y, h) -> toggle(x, y, h, "Auto-pick tools",
-                () -> config.autoSelectTool, v -> config.autoSelectTool = v));
-        row((x, y, h) -> toggle(x, y, h, "Remember settings",
-                () -> config.saveSettings, v -> config.saveSettings = v));
+        toggle("Auto-pick tools", () -> config.autoSelectTool, v -> config.autoSelectTool = v);
+        toggle("Remember settings", () -> config.saveSettings, v -> config.saveSettings = v);
     }
 
     /** The shopping list: body is drawn in render() so the numbers stay live. */
-    private void itemsTab() {
-        head("Materials");
-    }
+    private void itemsTab() { head("Materials"); }
 
-    private void statusTab() {
-        head("Progress");
-        // The approve/decline pair is placed in init() at a fixed spot rather
-        // than as rows: rows lay out top-down, which would put the buttons above
-        // the statistics they refer to.
-    }
+    private void statusTab() { head("Progress"); }
 
-    // ---------------------------------------------------------------- widgets
+    // ---------------------------------------------------------------- row builders
 
-    /** A button reading "Label: value" that advances to the next value on click. */
-    private <T> ButtonWidget cycler(int x, int y, int h, String label, T[] values,
-                                    Supplier<T> getter, Consumer<T> setter, Function<T, String> render) {
-        return ButtonWidget.builder(Text.literal(label + ": " + render.apply(getter.get())), btn -> {
+    private <T> void cycler(String label, T[] values, Supplier<T> getter, Consumer<T> setter, Function<T, String> render) {
+        Runnable onClick = () -> {
             T current = getter.get();
             int index = 0;
             for (int i = 0; i < values.length; i++) {
                 if (values[i].equals(current)) { index = i; break; }
             }
-            T next = values[(index + 1) % values.length];
-            setter.accept(next);
-            btn.setMessage(Text.literal(label + ": " + render.apply(next)));
+            setter.accept(values[(index + 1) % values.length]);
             AutoBuilderClient.saveConfig();
-        }).dimensions(x, y, PANEL_W, h).build();
+        };
+        rows.add(new Row(RowKind.OPTION, null, label, () -> render.apply(getter.get()), null, onClick, null));
     }
 
-    private ButtonWidget toggle(int x, int y, int h, String label,
-                                Supplier<Boolean> getter, Consumer<Boolean> setter) {
-        return cycler(x, y, h, label, new Boolean[]{Boolean.TRUE, Boolean.FALSE},
-                getter, setter, v -> v ? "ON" : "OFF");
+    private void toggle(String label, Supplier<Boolean> getter, Consumer<Boolean> setter) {
+        Runnable onClick = () -> {
+            setter.accept(!getter.get());
+            AutoBuilderClient.saveConfig();
+        };
+        rows.add(new Row(RowKind.OPTION, null, label, null, getter::get, onClick, null));
     }
 
-    /**
-     * Text fields don't push on every keystroke -- the apply runs on tab change,
-     * start, or close, so a half-typed value never lands in the config.
-     */
-    private TextFieldWidget field(int x, int y, int h, String placeholder, String initial, Consumer<String> apply) {
-        TextFieldWidget widget = new TextFieldWidget(this.textRenderer, x, y, PANEL_W, h, Text.literal(placeholder));
-        widget.setMaxLength(256);
-        widget.setText(initial);
-        widget.setPlaceholder(Text.literal(placeholder));
-        pendingApplies.add(() -> apply.accept(widget.getText()));
-        return widget;
+    /** Text fields don't push on every keystroke -- apply runs on tab change, start, or close. */
+    private void field(String placeholder, String initial, Consumer<String> apply) {
+        rows.add(new Row(RowKind.FIELD, null, null, null, null, null, (x, y, w, h) -> {
+            TextFieldWidget widget = new TextFieldWidget(this.textRenderer, x, y, w, h, Text.literal(placeholder));
+            widget.setMaxLength(256);
+            widget.setText(initial);
+            widget.setPlaceholder(Text.literal(placeholder));
+            widget.setDrawsBackground(false); // flat BG_FIELD box is drawn behind it in render() instead
+            pendingApplies.add(() -> apply.accept(widget.getText()));
+            return widget;
+        }));
     }
 
     private static double parseDouble(String text, double fallback) {
@@ -410,6 +385,34 @@ public class BuildOptionsScreen extends Screen {
         AutoBuilderClient.saveConfig();
     }
 
+    // ---------------------------------------------------------------- input
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (super.mouseClicked(mouseX, mouseY, button)) return true;
+        if (button != 0) return false;
+        for (int i = 0; i < tabZones.size(); i++) {
+            int[] z = tabZones.get(i);
+            if (mouseX >= z[0] && mouseX < z[0] + z[1] && mouseY >= panelTop && mouseY < panelTop + TAB_H) {
+                switchTo(i);
+                return true;
+            }
+        }
+        for (Placed p : placedOptions) {
+            if (p.row().kind() == RowKind.OPTION && p.contains(mouseX, mouseY)) {
+                p.row().onClick().run();
+                return true;
+            }
+        }
+        for (ClickZone zone : clickZones) {
+            if (zone.contains(mouseX, mouseY)) {
+                zone.action().run();
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ---------------------------------------------------------------- render
 
     @Override
@@ -420,115 +423,198 @@ public class BuildOptionsScreen extends Screen {
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        int left = this.width / 2 - PANEL_W / 2;
-        context.fill(left - 8, 22, left + PANEL_W + 8, this.height - 6, PANEL_BG);
-        context.fill(left - 8, 22, left + PANEL_W + 8, 23, PANEL_EDGE);
+        int left = panelLeft;
+        context.fill(left - 10, 20, left + PANEL_W + 10, this.height - 4, BG_PANEL);
+        context.fill(left - 10, 20, left + PANEL_W + 10, 21, ACCENT_LINE);
+
+        // Field backgrounds drawn before super.render() so the (background-less)
+        // TextFieldWidgets paint their text on top of our flat box, not the
+        // other way around.
+        for (Placed p : placedOptions) {
+            if (p.row().kind() == RowKind.FIELD) {
+                context.fill(p.x() - 3, p.y() - 2, p.x() + p.w() + 3, p.y() + p.h() + 2, BG_FIELD);
+                context.fill(p.x() - 3, p.y() + p.h() + 1, p.x() + p.w() + 3, p.y() + p.h() + 2, ACCENT_LINE);
+            }
+        }
 
         super.render(context, mouseX, mouseY, delta);
 
-        context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, 12, TITLE);
+        context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, 10, TEXT_PRIMARY);
 
-        // Underline the active tab -- clearer than bracketing its text, and it
-        // doesn't make the label jump around as tabs change width.
-        int tabW = PANEL_W / TABS.length;
-        context.fill(left + tab * tabW, 30 + TAB_H, left + tab * tabW + tabW - 2, 30 + TAB_H + 2, 0xFFFFD68A);
+        renderTabs(context, mouseX, mouseY);
 
         for (Label label : labels) {
-            context.drawTextWithShadow(this.textRenderer, Text.literal(label.text()),
-                    label.x(), label.y(), label.color());
+            context.drawTextWithShadow(this.textRenderer, Text.literal(label.text()), label.x(), label.y(), label.color());
+        }
+        for (Placed p : placedOptions) {
+            if (p.row().kind() == RowKind.OPTION) renderOption(context, p, mouseX, mouseY);
         }
 
         if (tab == 0 && schematicStatusY >= 0) renderSchematicStatus(context, left);
         if (tab == 5) renderItems(context, left);
         if (tab == 6) renderStatus(context, left);
 
+        for (ClickZone zone : clickZones) {
+            renderControlButton(context, zone, mouseX, mouseY);
+        }
+
         boolean loaded = schematicSource.isLoaded();
         context.drawCenteredTextWithShadow(this.textRenderer,
                 Text.literal(loaded ? schematicSource.describe() : "No schematic loaded"),
-                this.width / 2, this.height - 40, loaded ? MUTED : BAD);
+                this.width / 2, this.height - 42, loaded ? TEXT_SECONDARY : BAD);
     }
 
-    /**
-     * Drawn fresh every frame rather than baked into a Row at init(), so it
-     * reflects LitematicaSync's latest read without needing the screen reopened.
-     */
+    private void renderTabs(DrawContext context, int mouseX, int mouseY) {
+        for (int i = 0; i < TABS.length; i++) {
+            int[] z = tabZones.get(i);
+            boolean active = i == tab;
+            boolean hovered = mouseX >= z[0] && mouseX < z[0] + z[1] && mouseY >= panelTop && mouseY < panelTop + TAB_H;
+            if (hovered && !active) context.fill(z[0], panelTop, z[0] + z[1], panelTop + TAB_H, HOVER_BG);
+            int color = active ? ACCENT : (hovered ? TEXT_PRIMARY : TEXT_SECONDARY);
+            int tw = this.textRenderer.getWidth(TABS[i]);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(TABS[i]),
+                    z[0] + (z[1] - tw) / 2, panelTop + (TAB_H - 8) / 2, color);
+            if (active) context.fill(z[0], panelTop + TAB_H, z[0] + z[1], panelTop + TAB_H + 2, ACCENT);
+        }
+    }
+
+    private void renderOption(DrawContext context, Placed p, int mouseX, int mouseY) {
+        boolean hovered = p.contains(mouseX, mouseY);
+        if (hovered) context.fill(p.x() - 4, p.y() - 2, p.x() + p.w() + 4, p.y() + p.h() + 2, HOVER_BG);
+
+        context.drawTextWithShadow(this.textRenderer, Text.literal(p.row().label()),
+                p.x() + 2, p.y() + (p.h() - 8) / 2, TEXT_PRIMARY);
+
+        if (p.row().toggleState() != null) {
+            renderSwitch(context, p, p.row().toggleState().getAsBoolean());
+        } else {
+            String text = p.row().value().get() + "  ›"; // trailing "›" hints it's clickable
+            int tw = this.textRenderer.getWidth(text);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(text),
+                    p.x() + p.w() - tw - 2, p.y() + (p.h() - 8) / 2, ACCENT);
+        }
+    }
+
+    private void renderSwitch(DrawContext context, Placed p, boolean on) {
+        int trackW = 24, trackH = 12;
+        int tx = p.x() + p.w() - trackW - 2;
+        int ty = p.y() + (p.h() - trackH) / 2;
+        context.fill(tx, ty, tx + trackW, ty + trackH, on ? ACCENT : TRACK_OFF);
+        int thumb = 8;
+        int thumbX = on ? tx + trackW - thumb - 2 : tx + 2;
+        int thumbY = ty + (trackH - thumb) / 2;
+        context.fill(thumbX, thumbY, thumbX + thumb, thumbY + thumb, TEXT_PRIMARY);
+    }
+
+    private void renderControlButton(DrawContext context, ClickZone zone, int mouseX, int mouseY) {
+        boolean hovered = zone.contains(mouseX, mouseY);
+
+        switch (zone.style()) {
+            case PRIMARY -> context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(),
+                    hovered ? ACCENT : ACCENT_LINE);
+            case DANGER -> {
+                if (hovered) context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(), HOVER_BG);
+                drawOutline(context, zone.x(), zone.y(), zone.w(), zone.h(), BAD);
+            }
+            case GHOST -> {
+                if (hovered) context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(), HOVER_BG);
+                drawOutline(context, zone.x(), zone.y(), zone.w(), zone.h(), TEXT_DIM);
+            }
+            case PLAIN -> {
+                if (hovered) context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(), HOVER_BG);
+            }
+        }
+
+        int textColor = switch (zone.style()) {
+            case PRIMARY -> TEXT_PRIMARY;
+            case DANGER -> BAD;
+            case GHOST, PLAIN -> TEXT_SECONDARY;
+        };
+        int tw = this.textRenderer.getWidth(zone.label());
+        context.drawTextWithShadow(this.textRenderer, Text.literal(zone.label()),
+                zone.x() + (zone.w() - tw) / 2, zone.y() + (zone.h() - 8) / 2, textColor);
+    }
+
+    private void drawOutline(DrawContext context, int x, int y, int w, int h, int color) {
+        context.fill(x, y, x + w, y + 1, color);
+        context.fill(x, y + h - 1, x + w, y + h, color);
+        context.fill(x, y, x + 1, y + h, color);
+        context.fill(x + w - 1, y, x + w, y + h, color);
+    }
+
+    /** Drawn fresh every frame so it reflects LitematicaSync's latest read without reopening the menu. */
     private void renderSchematicStatus(DrawContext context, int x) {
         boolean loaded = schematicSource.isLoaded();
         String text = loaded
                 ? "✓ " + schematicSource.describe()
                 : "✗ " + AutoBuilderClient.LITEMATICA_SYNC.getStatus();
-        context.drawTextWithShadow(this.textRenderer, Text.literal(text),
-                x, schematicStatusY, loaded ? GOOD : WARN);
+        context.drawTextWithShadow(this.textRenderer, Text.literal(text), x, schematicStatusY, loaded ? GOOD : WARN);
     }
 
     private void renderItems(DrawContext context, int x) {
-        int y = contentBottom + 2;
+        int y = contentBottom + 4;
         Map<Item, Integer> needed = executor.getMaterials();
         if (needed.isEmpty()) {
             context.drawTextWithShadow(this.textRenderer,
-                    Text.literal("Press Start to work out what this build needs."), x, y, MUTED);
+                    Text.literal("Press Start to work out what this build needs."), x, y, TEXT_SECONDARY);
             return;
         }
         Map<Item, Integer> shortfall = executor.getShortfall(MinecraftClient.getInstance());
 
         int shown = 0;
-        int maxRows = (this.height - 100 - y) / 11;
+        int maxRows = (this.height - 100 - y) / 12;
         for (Map.Entry<Item, Integer> entry : needed.entrySet()) {
             if (shown >= maxRows) {
                 context.drawTextWithShadow(this.textRenderer,
-                        Text.literal("... and " + (needed.size() - shown) + " more"), x, y, MUTED);
+                        Text.literal("... and " + (needed.size() - shown) + " more"), x, y, TEXT_SECONDARY);
                 break;
             }
             int missing = shortfall.getOrDefault(entry.getKey(), 0);
-            String name = entry.getKey().getName().getString();
-            context.drawTextWithShadow(this.textRenderer, Text.literal(name), x, y, MUTED);
             context.drawTextWithShadow(this.textRenderer,
-                    Text.literal("need " + entry.getValue()), x + 170, y, MUTED);
+                    Text.literal(entry.getKey().getName().getString()), x, y, TEXT_PRIMARY);
+            context.drawTextWithShadow(this.textRenderer,
+                    Text.literal("need " + entry.getValue()), x + 172, y, TEXT_SECONDARY);
             context.drawTextWithShadow(this.textRenderer,
                     Text.literal(missing > 0 ? "short " + missing : "ok"),
-                    x + 245, y, missing > 0 ? BAD : GOOD);
-            y += 11;
+                    x + 248, y, missing > 0 ? BAD : GOOD);
+            y += 12;
             shown++;
         }
     }
 
     private void renderStatus(DrawContext context, int x) {
-        int y = contentBottom + 2;
+        int y = contentBottom + 4;
 
         int done = executor.getPlacedCount();
         int total = executor.getTotalCount();
         int percent = total == 0 ? 0 : done * 100 / total;
 
-        // Progress bar: one glance tells you more than the numbers do.
-        context.fill(x, y, x + PANEL_W, y + 8, 0x60000000);
-        context.fill(x, y, x + (int) (PANEL_W * (percent / 100.0)), y + 8, 0xFF5FA85F);
+        context.fill(x, y, x + PANEL_W, y + 8, BG_FIELD);
+        context.fill(x, y, x + (int) (PANEL_W * (percent / 100.0)), y + 8, GOOD);
         y += 14;
 
-        line(context, x, y, "Progress", total == 0 ? "no plan yet"
-                : done + " / " + total + "  (" + percent + "%)", GOOD); y += 11;
-        line(context, x, y, "State", executor.getState().toString(), GOOD); y += 11;
-        line(context, x, y, "Doing", executor.getStatusMessage(), MUTED); y += 11;
-        line(context, x, y, "Layer", executor.getLayerProgress(), MUTED); y += 11;
-        line(context, x, y, "Rate", String.format("%.0f blocks/min", executor.getBlocksPerMinute()), MUTED); y += 11;
-        line(context, x, y, "ETA", executor.getEta(), MUTED); y += 11;
+        line(context, x, y, "Progress", total == 0 ? "no plan yet" : done + " / " + total + "  (" + percent + "%)", GOOD); y += 12;
+        line(context, x, y, "State", executor.getState().toString(), GOOD); y += 12;
+        line(context, x, y, "Doing", executor.getStatusMessage(), TEXT_SECONDARY); y += 12;
+        line(context, x, y, "Layer", executor.getLayerProgress(), TEXT_SECONDARY); y += 12;
+        line(context, x, y, "Rate", String.format("%.0f blocks/min", executor.getBlocksPerMinute()), TEXT_SECONDARY); y += 12;
+        line(context, x, y, "ETA", executor.getEta(), TEXT_SECONDARY); y += 12;
         line(context, x, y, "Skipped", String.valueOf(executor.getSkippedCount()),
-                executor.getSkippedCount() > 0 ? WARN : MUTED); y += 11;
-        line(context, x, y, "To remove", String.valueOf(executor.getRemovalCount()), MUTED); y += 11;
-        line(context, x, y, "Fatigue", executor.getFatiguePercent() + "%", MUTED); y += 11;
+                executor.getSkippedCount() > 0 ? WARN : TEXT_SECONDARY); y += 12;
+        line(context, x, y, "To remove", String.valueOf(executor.getRemovalCount()), TEXT_SECONDARY); y += 12;
+        line(context, x, y, "Fatigue", executor.getFatiguePercent() + "%", TEXT_SECONDARY); y += 12;
 
         if (executor.isAwaitingPurchaseConfirmation()) {
             y += 6;
-            context.drawTextWithShadow(this.textRenderer,
-                    Text.literal("Waiting for approval:"), x, y, WARN);
-            y += 11;
-            context.drawTextWithShadow(this.textRenderer,
-                    Text.literal(executor.getPurchasePrompt()), x, y, BAD);
+            context.drawTextWithShadow(this.textRenderer, Text.literal("Waiting for approval:"), x, y, WARN);
+            y += 12;
+            context.drawTextWithShadow(this.textRenderer, Text.literal(executor.getPurchasePrompt()), x, y, BAD);
         }
     }
 
     private void line(DrawContext context, int x, int y, String label, String value, int color) {
-        context.drawTextWithShadow(this.textRenderer, Text.literal(label), x, y, MUTED);
-        context.drawTextWithShadow(this.textRenderer, Text.literal(value), x + 78, y, color);
+        context.drawTextWithShadow(this.textRenderer, Text.literal(label), x, y, TEXT_SECONDARY);
+        context.drawTextWithShadow(this.textRenderer, Text.literal(value), x + 82, y, color);
     }
 
     @Override
