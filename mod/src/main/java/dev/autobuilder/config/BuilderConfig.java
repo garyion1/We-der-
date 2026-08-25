@@ -150,11 +150,15 @@ public class BuilderConfig {
     }
 
     /**
-     * Buy missing blocks from the server's auction house. OFF by default: this
-     * spends real in-game currency with nobody at the controls, and most servers'
-     * rules treat automated buying the same as any other bot use.
+     * Buy missing blocks from the server's auction house as the build actually
+     * needs them -- no need to carry every material up front. ON by default,
+     * since a build with this off just skips every block it isn't carrying;
+     * the price caps below (autoBuyLimit/hardMaxPrice) are what keep spending
+     * in check, not this toggle. Turn it off on the Buying tab if you'd rather
+     * stock the inventory yourself, or if your server's rules prohibit
+     * automated buying.
      */
-    public boolean autoBuyMaterials = false;
+    public boolean autoBuyMaterials = true;
     /** Command that opens the auction search; %s becomes the item name. */
     public String auctionCommandTemplate = "/ah %s";
     /**

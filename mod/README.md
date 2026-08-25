@@ -28,8 +28,11 @@ Try it in **singleplayer** first.
 - **Most servers' rules prohibit automation** — auto-builders, macros, and
   auto-buyers alike — whether or not anti-cheat catches them. Checking your
   server's rules is on you.
-- **Auto-buying is off by default** (`Buying` tab) because it spends real
-  in-game currency with nobody watching.
+- **Auto-buying is on by default** (`Buying` tab): the builder never needs
+  every material stocked up front, it shops for whatever it's short on as it
+  goes. It spends real in-game currency with nobody watching, kept in check
+  by the two price limits below -- turn it off on the `Buying` tab if you'd
+  rather stock the inventory yourself.
 - The human-like motion makes the builder *look* natural rather than robotic.
   It is **not** designed against any particular anti-cheat and spoofs nothing.
   A server inspecting packets, or simply noticing an account building for nine
