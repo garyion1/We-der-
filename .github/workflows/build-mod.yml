@@ -50,3 +50,21 @@ jobs:
           name: auto-litematica-builder-jar
           path: mod/build/libs/*.jar
           if-no-files-found: error
+
+      - name: Probe real API surface with javap
+        if: always()
+        run: |
+          jar="$(find ~/.gradle/caches/fabric-loom -iname '*.jar' \
+                 | grep -iE 'minecraft.*(named|mapped)' | grep -v sources | head -1)"
+          echo "Using jar: $jar"
+          [ -z "$jar" ] && { echo "no mapped MC jar found"; find ~/.gradle/caches/fabric-loom -iname '*.jar'; exit 0; }
+          d=/tmp/mcjar && rm -rf "$d" && mkdir -p "$d" && cd "$d"
+          unzip -q "$jar" 'net/minecraft/client/gui/*.class'
+          for c in net/minecraft/client/gui/Click.class \
+                   net/minecraft/client/gui/Element.class \
+                   net/minecraft/client/gui/ParentElement.class \
+                   net/minecraft/client/gui/screen/Screen.class \
+                   net/minecraft/client/gui/Selectable.class; do
+            echo "=================== $c ==================="
+            [ -f "$c" ] && javap -p "$c" || echo "(not found at that path)"
+          done
