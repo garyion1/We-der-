@@ -61,10 +61,6 @@ public class BuildPlanner {
         BlockPos cursor = origin;
         int scaffoldCount = 0;
 
-        Comparator<BlockPos> byLayerThenDistance = Comparator
-                .comparingInt(BlockPos::getY)
-                .thenComparingDouble(p -> p.getSquaredDistance(cursor.getX(), cursor.getY(), cursor.getZ()));
-
         BoundingBox bbox = BoundingBox.of(targetBlocks.keySet());
 
         while (!remaining.isEmpty()) {
@@ -100,19 +96,26 @@ public class BuildPlanner {
                 }
             }
 
+            // cursor is reassigned each iteration, so it cannot be captured by a
+            // lambda directly -- snapshot it. Built per-iteration rather than once
+            // up front, so "nearest" is measured from where the builder actually
+            // is now rather than from the starting position.
+            final BlockPos from = cursor;
+            Comparator<BlockPos> byDistance = Comparator.comparingDouble(
+                    p -> p.getSquaredDistance(from.getX(), from.getY(), from.getZ()));
+
             BlockPos next = switch (strategy) {
-                case NEAREST_FIRST -> candidates.stream().min(byLayerThenDistance).orElseThrow();
+                case NEAREST_FIRST -> candidates.stream()
+                        .min(Comparator.<BlockPos>comparingInt(BlockPos::getY).thenComparing(byDistance))
+                        .orElseThrow();
                 case OUTSIDE_IN -> candidates.stream()
-                        .sorted(Comparator
-                                .<BlockPos>comparingInt(p -> bbox.isShell(p) ? 0 : 1)
+                        .min(Comparator.<BlockPos>comparingInt(p -> bbox.isShell(p) ? 0 : 1)
                                 .thenComparingInt(BlockPos::getY)
-                                .thenComparingDouble(p -> p.getSquaredDistance(cursor.getX(), cursor.getY(), cursor.getZ())))
-                        .findFirst().orElseThrow();
+                                .thenComparing(byDistance))
+                        .orElseThrow();
                 case BOTTOM_UP_LAYERS, SCAFFOLD_AWARE -> candidates.stream()
-                        .sorted(Comparator
-                                .comparingInt(BlockPos::getY)
-                                .thenComparingDouble(p -> p.getSquaredDistance(cursor.getX(), cursor.getY(), cursor.getZ())))
-                        .findFirst().orElseThrow();
+                        .min(Comparator.<BlockPos>comparingInt(BlockPos::getY).thenComparing(byDistance))
+                        .orElseThrow();
             };
 
             Direction support = findSupport(next, placed);
