@@ -23,6 +23,21 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      # The environment this mod was authored in cannot reach Fabric's servers,
+      # so version numbers had to be inferred. This step asks the runner (which
+      # can reach them) what actually exists, so failures name real versions.
+      - name: Probe Fabric metadata
+        run: |
+          echo "=== yarn builds for 1.21.11 ==="
+          curl -s "https://meta.fabricmc.net/v2/versions/yarn/1.21.11" | head -c 1500 || echo "(request failed)"
+          echo
+          echo "=== loader for 1.21.11 (first entry) ==="
+          curl -s "https://meta.fabricmc.net/v2/versions/loader/1.21.11" | head -c 400 || echo "(request failed)"
+          echo
+          echo "=== latest game versions ==="
+          curl -s "https://meta.fabricmc.net/v2/versions/game" | head -c 300 || echo "(request failed)"
+          echo
+
       - name: Build
         working-directory: mod
         run: |
