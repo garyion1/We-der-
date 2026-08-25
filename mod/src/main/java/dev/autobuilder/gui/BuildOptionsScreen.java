@@ -5,6 +5,7 @@ import dev.autobuilder.config.BuilderConfig;
 import dev.autobuilder.exec.BuildExecutor;
 import dev.autobuilder.schematic.LitematicFileSchematicSource;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.TextFieldWidget;
@@ -388,9 +389,11 @@ public class BuildOptionsScreen extends Screen {
     // ---------------------------------------------------------------- input
 
     @Override
-    public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (super.mouseClicked(mouseX, mouseY, button)) return true;
-        if (button != 0) return false;
+    public boolean mouseClicked(Click click, boolean doubled) {
+        if (super.mouseClicked(click, doubled)) return true;
+        if (click.button() != 0) return false;
+        double mouseX = click.x();
+        double mouseY = click.y();
         for (int i = 0; i < tabZones.size(); i++) {
             int[] z = tabZones.get(i);
             if (mouseX >= z[0] && mouseX < z[0] + z[1] && mouseY >= panelTop && mouseY < panelTop + TAB_H) {
