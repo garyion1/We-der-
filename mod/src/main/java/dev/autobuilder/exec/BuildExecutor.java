@@ -393,7 +393,11 @@ public class BuildExecutor {
             return "inventory is full";
         }
         if (consecutiveFailures >= config.stopAfterConsecutiveFailures) {
-            return consecutiveFailures + " placements in a row failed -- something is wrong";
+            // "Something is wrong" told the user nothing. statusMessage already
+            // carries the reason for whichever of those failures happened most
+            // recently (couldn't path there, no support to build from, wrong
+            // block landed, ...), so surface it instead of a dead end.
+            return consecutiveFailures + " placements in a row failed -- last reason: " + statusMessage;
         }
         return null;
     }
@@ -745,8 +749,15 @@ public class BuildExecutor {
 
     private void handleAlign(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (bp.supportNeighbor() == null || bp.clickFace() == null) {
-            // Planner couldn't find support for this one (only happens on non-scaffold
-            // strategies for floating sections) -- nothing sensible to click, skip it.
+            // Planner couldn't find anything to support this one -- nothing
+            // touches it (not the world, not anything built so far), and even
+            // SCAFFOLD_AWARE found no ground within reach to build a column up
+            // from. This is what a genuinely floating section (nothing solid
+            // for dozens of blocks in any direction -- open water, a void
+            // world, a schematic placed somewhere it doesn't actually rest on
+            // anything) looks like: there's nothing sensible to click, so skip
+            // it, but say so instead of just counting a silent failure.
+            statusMessage = "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from";
             skipped.add(bp);
             advance(false);
             return;
@@ -914,6 +925,7 @@ public class BuildExecutor {
     private void handlePlace(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (bp.supportNeighbor() == null || bp.clickFace() == null) {
             // Stranded block with no computed support -- can't place it. Skip.
+            statusMessage = "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from";
             skipped.add(bp);
             consecutiveFailures++;
             advance(false);
