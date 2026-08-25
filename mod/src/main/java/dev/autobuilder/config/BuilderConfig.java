@@ -116,8 +116,15 @@ public class BuilderConfig {
     public boolean avoidHazards = true;
     /** Won't path down drops taller than this. */
     public int maxFallDistance = 3;
-    /** A* search budget. Higher copes with mazier terrain, at some CPU cost. */
-    public int maxPathNodes = 4000;
+    /**
+     * A* search budget. Higher copes with mazier terrain, at some CPU cost.
+     * The fenced area around a build (see BUILD_AREA_MARGIN in BuildExecutor)
+     * can be a few thousand blocks across for anything of real size, so the
+     * old default of 4000 could run out before finding a route through
+     * anything but simple terrain -- a search that quits early looks
+     * identical to "there's no way there" even when one exists.
+     */
+    public int maxPathNodes = 8000;
     /** Walk back to where the build started once it's finished. */
     public boolean returnHomeWhenDone = false;
 

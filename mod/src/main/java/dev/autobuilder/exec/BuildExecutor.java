@@ -102,7 +102,14 @@ public class BuildExecutor {
                     && p.getZ() >= minZ - margin && p.getZ() <= maxZ + margin;
         }
     }
-    private static final int BUILD_AREA_MARGIN = 6;
+    // 6 was too tight for a real build of any real size: legitimately
+    // connected ground can wind further than 6 blocks past the schematic's
+    // own footprint to get around an obstacle, and every position the fence
+    // rules out shows up as "couldn't find a way" even though a real player
+    // could just walk there. Wide enough to comfortably route around most
+    // terrain features without coming close to the unfenced wandering this
+    // was added to stop in the first place.
+    private static final int BUILD_AREA_MARGIN = 20;
     private BuildArea buildArea;
     /** Completion text held while walking home, so the final status keeps it. */
     private String finishedMessage = "";
@@ -595,7 +602,7 @@ public class BuildExecutor {
             return;
         }
 
-        stepToward(client, player, current.pos());
+        stepToward(client, player, current.pos(), current.type());
         if (config.allowJump && current.type() == PathFinder.StepType.JUMP && player.isOnGround()) {
             client.options.jumpKey.setPressed(true);
         }
@@ -1067,12 +1074,18 @@ public class BuildExecutor {
 
     // -- movement / inventory helpers ------------------------------------
 
-    private void stepToward(MinecraftClient client, ClientPlayerEntity player, BlockPos target) {
+    private void stepToward(MinecraftClient client, ClientPlayerEntity player, BlockPos target,
+                            PathFinder.StepType stepType) {
         Vec3d targetCenter = Vec3d.ofBottomCenter(target);
         double dx = targetCenter.x - player.getX(), dz = targetCenter.z - player.getZ();
         float targetYaw = (float) Math.toDegrees(Math.atan2(dz, dx)) - 90f;
 
-        look = motion.stepLook(look, targetYaw, Math.max(-25f, Math.min(15f, look.pitch())));
+        // Look down at the ground ahead while walking -- watching footing --
+        // rather than merely clamping whatever pitch it already happened to
+        // have. Steeper on a JUMP/DROP step, the way anyone eyeing an edge
+        // they're about to step off or onto actually looks.
+        float targetPitch = stepType == PathFinder.StepType.WALK ? 20f : 32f;
+        look = motion.stepLook(look, targetYaw, targetPitch);
         player.setYaw(look.yaw());
         player.setPitch(look.pitch());
 
