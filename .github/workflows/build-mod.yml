@@ -55,7 +55,7 @@ jobs:
         if: always()
         run: |
           jar="$(find ~/.gradle/caches/fabric-loom -iname 'minecraft-merged-*.jar' \
-                 | grep -v sources | head -1)"
+                 | grep -v sources | grep -v intermediary | head -1)"
           echo "Using jar: $jar"
           [ -z "$jar" ] && { echo "no mapped MC jar found"; find ~/.gradle/caches/fabric-loom -iname '*.jar'; exit 0; }
           d=/tmp/mcjar && rm -rf "$d" && mkdir -p "$d" && cd "$d"
