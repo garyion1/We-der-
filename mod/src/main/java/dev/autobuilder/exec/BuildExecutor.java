@@ -68,6 +68,14 @@ public class BuildExecutor {
     private int fetchSlot;
     /** Last skip/failure reason echoed to chat, so an unchanged reason repeating many times in a row doesn't spam it. */
     private String lastAnnouncedReason = "";
+    /**
+     * Counts automatic replans triggered by a run of failures, without a
+     * single successful placement between them. Reset to 0 the moment
+     * anything actually lands, so a genuinely productive build never trips
+     * it -- it's specifically for "stuck no matter how many times we
+     * recheck reality."
+     */
+    private int replansSinceProgress;
 
     /** Materials the auction house couldn't supply; don't keep retrying them. */
     private final Set<Item> unbuyable = new HashSet<>();
@@ -77,6 +85,15 @@ public class BuildExecutor {
     private HumanMotion.LookState restGazeTarget;
 
     private boolean verifyPassDone;
+    /**
+     * True only until the very first plan of a build has run. Distinct from
+     * verifyPassDone (which tracks whether the post-completion re-check has
+     * happened) -- this instead gates whether placedCount/skipped get reset,
+     * so a mid-build replan (the post-completion verify pass, or the
+     * failure-triggered replan below) is recognized as the same build
+     * continuing rather than a new one wiping out real progress already made.
+     */
+    private boolean isFirstPlan;
     private BlockPos homePosition;
     /**
      * The schematic's own bounding box, padded by BUILD_AREA_MARGIN. Build
@@ -140,8 +157,10 @@ public class BuildExecutor {
             return;
         }
         this.verifyPassDone = false;
+        this.isFirstPlan = true;
         this.retriesOnCurrent = 0;
         this.consecutiveFailures = 0;
+        this.replansSinceProgress = 0;
         this.homePosition = client.player != null ? client.player.getBlockPos() : null;
         this.motion = new HumanMotion(config); // pick up any pace change from the GUI
         this.unbuyable.clear();
@@ -288,11 +307,13 @@ public class BuildExecutor {
         placementIndex = 0;
         retriesOnCurrent = 0;
         consecutiveFailures = 0;
-        // A verify pass keeps the running totals -- it's the same build continuing,
-        // not a new one.
-        if (!verifyPassDone) {
+        // Any replan after the first -- the post-completion verify pass, or a
+        // mid-build recovery from a run of failures -- keeps the running
+        // totals, since it's the same build continuing, not a new one.
+        if (isFirstPlan) {
             placedCount = 0;
             skipped.clear();
+            isFirstPlan = false;
         }
 
         if (plan.order().isEmpty()) {
@@ -316,6 +337,22 @@ public class BuildExecutor {
         statusMessage = "building " + plan.order().size() + " blocks (" + plan.scaffoldBlocksUsed() + " scaffold)";
     }
 
+    /**
+     * Once this many placements in a row fail, replanning before continuing
+     * usually resolves it: the plan is built once up front and assumes every
+     * earlier placement succeeded, but a real placement can silently fail
+     * (blocked, rejected, mistimed). Anything later in the plan that was
+     * planned to rely on that block's support as a foothold is now planned
+     * against something that was never actually built -- and since nothing
+     * re-checks reality until the whole plan is exhausted, one early failure
+     * can cascade into a long, entirely avoidable run of "couldn't find a
+     * way" failures for a whole region that a fresh plan (built from what's
+     * actually standing right now) would route around correctly.
+     */
+    private static final int REPLAN_TRIGGER_FAILURES = 8;
+    /** Caps repeated auto-replanning when it isn't actually helping, so a genuinely stuck build still reaches the normal pause instead of replanning forever. */
+    private static final int MAX_REPLANS_WITHOUT_PROGRESS = 4;
+
     private void doRun(MinecraftClient client, ClientPlayerEntity player) {
         String abort = checkSafety(client, player);
         if (abort != null) {
@@ -323,6 +360,15 @@ public class BuildExecutor {
             state = State.PAUSED;
             statusMessage = abort;
             player.sendMessage(Text.literal("[Auto Builder] paused: " + abort), false);
+            return;
+        }
+
+        if (consecutiveFailures >= REPLAN_TRIGGER_FAILURES && replansSinceProgress < MAX_REPLANS_WITHOUT_PROGRESS) {
+            replansSinceProgress++;
+            statusMessage = "several placements failed in a row -- rechecking against what's actually built so far";
+            player.sendMessage(Text.literal("[Auto Builder] " + statusMessage), false);
+            resetInputs();
+            state = State.PLANNING;
             return;
         }
 
@@ -908,7 +954,14 @@ public class BuildExecutor {
         if (waitTicks-- > 0) return;
         player.getInventory().setStack(fetchSlot, new ItemStack(fetchItem, 64));
         selectHotbarSlot(player, fetchSlot);
-        if (client.currentScreen instanceof InventoryScreen) client.setScreen(null);
+        // Unconditional -- the earlier `instanceof InventoryScreen` check
+        // could silently leave the inventory open: a creative player's E key
+        // normally opens CreativeInventoryScreen, not this one, and if the
+        // client (or server) ever substitutes that in underneath us the type
+        // check would no longer match, so it never got closed. This state is
+        // the only one that opens a screen, and PLACE needs none open, so
+        // whatever's there when the wait ends should always be closed.
+        client.setScreen(null);
         fetchItem = null;
         step = Step.PLACE;
     }
@@ -954,6 +1007,7 @@ public class BuildExecutor {
             if (bp.isRemoval()) {
                 // Nothing left to place -- the removal is done.
                 consecutiveFailures = 0;
+                replansSinceProgress = 0;
                 advance(false);
             } else {
                 step = Step.PLACE;
@@ -1009,6 +1063,7 @@ public class BuildExecutor {
         if (correct) {
             placedCount++;
             consecutiveFailures = 0;
+            replansSinceProgress = 0;
         } else {
             // Wrong block sitting in a schematic position is a deviation, so say
             // so rather than quietly counting it.
