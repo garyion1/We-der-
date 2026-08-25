@@ -3,25 +3,21 @@
   "id": "autobuilder",
   "version": "${version}",
   "name": "Auto Litematica Builder",
-  "description": "Reads a loaded Litematica schematic and builds it itself: plans a placement order, paths around the build (pearl-climbing where needed), restocks materials, and places blocks with human-paced input.",
+  "description": "Reads a .litematic schematic and builds it itself: plans a placement order, paths around the build (pearl-climbing where needed), restocks materials, and places blocks with human-paced input.",
   "authors": ["you"],
-  "contact": {},
   "license": "MIT",
-  "icon": "assets/autobuilder/icon.png",
   "environment": "client",
   "entrypoints": {
     "main": ["dev.autobuilder.AutoBuilderMod"],
     "client": ["dev.autobuilder.AutoBuilderClient"]
   },
-  "mixins": [],
   "depends": {
-    "fabricloader": ">=0.16.0",
+    "fabricloader": ">=0.18.0",
     "fabric-api": "*",
-    "minecraft": "1.21.11",
+    "minecraft": "~1.21.11",
     "java": ">=21"
   },
   "recommends": {
-    "litematica": "*",
-    "malilib": "*"
+    "litematica": "*"
   }
 }

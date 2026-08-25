@@ -1,6 +1,6 @@
 plugins {
-    id 'fabric-loom' version '1.9-SNAPSHOT'
-    id 'maven-publish'
+    // Loom 1.14 is what Fabric's 1.21.11 announcement specifies.
+    id 'fabric-loom' version '1.14-SNAPSHOT'
 }
 
 version = project.mod_version
@@ -11,8 +11,6 @@ base {
 }
 
 repositories {
-    maven { url "https://maven.masa.dev/" } // Litematica / MaLiLib (masa's mods)
-    maven { url "https://maven.nucleoid.xyz/" } // Baritone builds mirror (adjust if stale)
     mavenCentral()
 }
 
@@ -22,23 +20,14 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
-    // Litematica itself is NOT a hard dependency: we parse .litematic files
-    // directly (see schematic/RawLitematicReader.java) the same way Baritone's
-    // own litematica integration does, rather than reaching into Litematica's
-    // internal, non-public API surface which changes across versions. Litematica
-    // is only useful here as the tool you use to preview/position the build in
-    // the world before this mod builds it. Uncomment if you later want to read
-    // its live-loaded placement data directly instead of re-reading the file.
-    // modCompileOnly "fi.dy.masa.litematica:litematica:${project.minecraft_version}-SNAPSHOT"
-    // modCompileOnly "fi.dy.masa.malilib:malilib:${project.minecraft_version}-SNAPSHOT"
-}
-
-loom {
-    accessWidenerPath = file("src/main/resources/autobuilder.accesswidener")
+    // Litematica is deliberately NOT a dependency: this mod parses .litematic
+    // files itself (see schematic/RawLitematicReader.java) rather than binding
+    // to Litematica's internal API, which is not published for third-party use
+    // and shifts between versions. Install Litematica alongside this mod if you
+    // want its ghost-preview to position builds -- it just isn't needed to compile.
 }
 
 java {
-    withSourcesJar()
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
 }

@@ -1,5 +1,0 @@
-accessWidener v2 named
-
-# Add widened accessors here if a mixin ever needs package-private/private
-# vanilla members. Empty for now -- the mod is built entirely on public
-# Fabric API + Litematica API surfaces, no mixins required yet.

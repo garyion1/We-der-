@@ -1,6 +1,8 @@
 pluginManagement {
     repositories {
-        maven { url "https://maven.fabricmc.net/" }
+        // "url =" (assignment) rather than "url" (method call): the latter is
+        // deprecated in Gradle 8 and removed in Gradle 9. This form works on both.
+        maven { url = "https://maven.fabricmc.net/" }
         gradlePluginPortal()
     }
 }

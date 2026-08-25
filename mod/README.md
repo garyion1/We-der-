@@ -66,27 +66,55 @@ gui/BuildOptionsScreen.java           The ' menu: pick strategy/pace, toggle pea
                                         and auto-buy, start/pause/stop.
 ```
 
-## Setup
+## Building
 
-This environment has no network access to Mojang's/Fabric's Maven repositories, so
-none of this has been compiled or run yet. To actually build it:
+**This has never been compiled.** It was written in an environment whose network
+policy blocks `maven.fabricmc.net`, `libraries.minecraft.net` and
+`piston-meta.mojang.com`, so Loom could never resolve Minecraft to compile against.
+Everything below the Gradle config is therefore unverified against a real compiler --
+expect to fix things. See "Expect to fix" below.
 
-1. Install a JDK 21 and clone this `mod/` directory as a Fabric Loom project.
-2. Check **https://fabricmc.net/develop** for the Yarn mappings / Loader / Fabric API
-   build numbers that actually exist for `1.21.11`, and update `gradle.properties` --
-   the versions there are best-effort placeholders.
-3. `./gradlew genSources` (optional, for readable decompiled MC source in your IDE)
-   then `./gradlew build`.
-4. Fix whatever doesn't compile. The most likely trouble spots, in order:
-   - `exec/BuildExecutor.java` and `gui/BuildOptionsScreen.java` -- written against
-     Fabric/Yarn API shapes that are usually stable across 1.20-1.21.x, but every
-     release renames a few things and this was written without a compiler in the
-     loop.
-   - `economy/AuctionHouseBuyer.java`'s use of `DataComponentTypes.LORE` / the
-     `GenericContainerScreen` class name (item component API arrived in 1.20.5+
-     and is where I have the least certainty).
-5. Install Litematica (recommended, not required) to preview/position builds before
-   running this mod against them.
+Requirements: **JDK 21** (not 22+ -- Loom targets 21 for this MC version).
+
+```bash
+cd mod
+./gradlew build
+```
+
+The Gradle wrapper is included, pinning Gradle 8.14 -- use `./gradlew`, not a
+system-installed `gradle`. Homebrew currently installs Gradle 9.x, which trips
+over Loom's own deprecated API usage.
+
+Output jar lands in `build/libs/` (ignore the `-sources` one; the plain
+`auto-litematica-builder-0.1.0.jar` is the mod). Drop it in `.minecraft/mods/`
+alongside Fabric Loader and Fabric API.
+
+Versions in `gradle.properties` are taken from Fabric's 1.21.11 release
+announcement (2025-12-05) and Modrinth's Fabric API listing:
+Loom `1.14`, Loader `0.18.1`, Fabric API `0.141.1+1.21.11`. Yarn resolves
+dynamically via `1.21.11+build.+`. Note 1.21.11 is the **last** version Fabric
+ships Yarn mappings for -- a future port means migrating this code to Mojang
+mappings (`loom.officialMojangMappings()`), which renames most of the Minecraft
+classes this mod touches.
+
+### Expect to fix
+
+Roughly in descending order of how likely they are to break:
+
+1. `economy/AuctionHouseBuyer.java` -- `DataComponentTypes.LORE` and
+   `GenericContainerScreen`. The item-component API landed in 1.20.5 and has moved
+   since; this is the least certain file in the project.
+2. `exec/BuildExecutor.java` -- the largest surface area of Minecraft API calls
+   (`interactionManager`, `getInventory().selectedSlot`, key-binding presses).
+   `selectedSlot` in particular became a method rather than a field at some point.
+3. `gui/BuildOptionsScreen.java` -- widget builder signatures shift between releases.
+
+The parts *not* in that list -- `RawLitematicReader`, `BuildPlanner`, `PathFinder`,
+`HumanMotion` -- are mostly plain Java and don't depend much on Minecraft's API
+surface, so they're the most likely to be correct as written.
+
+Install Litematica (recommended, not required) to preview and position builds
+before running this against them.
 
 ## Known limitations / not yet handled
 
