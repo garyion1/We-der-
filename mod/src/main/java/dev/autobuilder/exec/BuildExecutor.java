@@ -2,6 +2,7 @@ package dev.autobuilder.exec;
 
 import dev.autobuilder.config.BuilderConfig;
 import dev.autobuilder.economy.AuctionHouseBuyer;
+import dev.autobuilder.gui.BuildOptionsScreen;
 import dev.autobuilder.nav.HumanMotion;
 import dev.autobuilder.nav.PathFinder;
 import dev.autobuilder.planner.BuildPlanner;
@@ -408,6 +409,8 @@ public class BuildExecutor {
             }
         }
 
+        if (actionsBlocked(client)) return;
+
         BlockPlacement bp = plan.order().get(placementIndex);
 
         switch (step) {
@@ -581,6 +584,7 @@ public class BuildExecutor {
      * walk would stall forever.
      */
     private void handleReturnHome(MinecraftClient client, ClientPlayerEntity player) {
+        if (client.currentScreen != null && !(client.currentScreen instanceof BuildOptionsScreen)) return;
         if (path.isEmpty() && pathIndex == 0) {
             path = buildPath(client, player, homePosition, false, false);
             if (path.isEmpty()) {
@@ -1158,6 +1162,21 @@ public class BuildExecutor {
         client.options.rightKey.setPressed(false);
         client.options.jumpKey.setPressed(false);
         client.options.sprintKey.setPressed(false);
+    }
+
+    /**
+     * True when some screen other than what the current step legitimately
+     * expects is open -- another mod's own menu, the player's inventory,
+     * chat, the pause screen. Real attention is elsewhere then, so movement,
+     * looking, and interacting should freeze rather than keep firing blind
+     * into whatever that screen actually is. This mod's own options screen
+     * is always allowed through (watching live progress shouldn't require
+     * closing it); ENSURE_ITEM (auction shopping) and FETCH_ITEM (creative
+     * pickup) manage their own screens and are exempted entirely.
+     */
+    private boolean actionsBlocked(MinecraftClient client) {
+        if (step == Step.ENSURE_ITEM || step == Step.FETCH_ITEM) return false;
+        return client.currentScreen != null && !(client.currentScreen instanceof BuildOptionsScreen);
     }
 
     private int countItem(ClientPlayerEntity player, Item item) {
