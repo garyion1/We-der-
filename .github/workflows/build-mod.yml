@@ -32,28 +32,16 @@ jobs:
           # On failure, re-print just the diagnostic section so it's readable.
           set -o pipefail
           ./gradlew build --no-daemon 2>&1 | tee build.log || {
-            echo "===================== FAILURE DETAIL ====================="
-            grep -B2 -A40 "What went wrong" build.log || tail -60 build.log
+            echo "=================== COMPILE ERRORS ======================="
+            # javac errors print as task output, well above the "What went
+            # wrong" summary, so pull them out explicitly.
+            grep -E "^(/|.*\.java:[0-9]+: )(error|warning)" build.log | head -80 \
+              || echo "(no javac errors -- failure was not compilation)"
+            echo "=================== FAILURE SUMMARY ======================"
+            grep -A12 "What went wrong" build.log || tail -30 build.log
             echo "=========================================================="
             exit 1
           }
-
-      # Runs last, and on failure, so its output sits at the end of the log where
-      # it can actually be read back. The environment this mod was authored in
-      # cannot reach Fabric's servers, so version numbers had to be inferred;
-      # this reports what genuinely exists.
-      - name: Probe Fabric metadata
-        if: failure()
-        run: |
-          echo "=== yarn builds for 1.21.11 ==="
-          curl -s "https://meta.fabricmc.net/v2/versions/yarn/1.21.11" | head -c 800 || echo "(request failed)"
-          echo
-          echo "=== yarn builds for 1.21.10 (fallback check) ==="
-          curl -s "https://meta.fabricmc.net/v2/versions/yarn/1.21.10" | head -c 400 || echo "(request failed)"
-          echo
-          echo "=== loader for 1.21.11 ==="
-          curl -s "https://meta.fabricmc.net/v2/versions/loader/1.21.11" | head -c 300 || echo "(request failed)"
-          echo
 
       - name: Upload jar
         if: success()
