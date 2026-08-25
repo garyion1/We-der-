@@ -13,34 +13,43 @@ import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Drives a server's auction-house GUI: send the search command, wait for the
- * container to open, read a price out of each listing's name/lore, and buy the
- * cheapest ones until the requested quantity is covered.
+ * Drives a server's auction-house GUI: search, read prices out of listing lore,
+ * and buy the cheapest ones until the requested quantity is covered.
  *
- * This spends real in-game currency without a human at the controls. Most
- * servers' rules treat automated buying the same as any other bot or macro use,
- * so BuilderConfig.autoBuyMaterials defaults to off -- check your server's rules
- * before turning it on.
+ * Finding the actual cheapest means paging: the cheapest listing on page one is
+ * not necessarily the cheapest listing. With scanAllPages on, every page is read
+ * first and only then is the best one bought.
  *
- * Every server's auction GUI differs: what a price looks like in the lore text,
- * whether buying takes one click or two. That's what auctionPriceRegex,
- * auctionRequiresConfirmClick and auctionConfirmDelayTicks are for -- watch what
- * your server actually does and tune them.
+ * Two price limits, deliberately separate:
+ *   - autoBuyLimit: bought without asking.
+ *   - above it: the trip stops and waits for explicit confirmation, so an
+ *     unattended build can't quietly drain an account on a mispriced listing.
+ *   - hardMaxPrice: never bought, confirmed or not.
+ * A listing whose price can't be parsed is never bought -- unreadable is treated
+ * as too expensive, not as free.
+ *
+ * This spends real in-game currency unattended. autoBuyMaterials defaults to off;
+ * most servers' rules treat automated buying the same as any other bot use.
  */
 public class AuctionHouseBuyer {
 
-    public enum Phase { IDLE, WAITING_FOR_GUI, CLICKING, CONFIRMING, SETTLING, DONE, FAILED }
+    public enum Phase {
+        IDLE, WAITING_FOR_GUI, SCANNING, TURNING_PAGE,
+        AWAITING_CONFIRMATION, CLICKING, CONFIRMING, SETTLING, DONE, FAILED
+    }
 
-    public record Listing(int slotId, double unitPrice, int quantity) {}
+    public record Listing(int slotId, double unitPrice, int quantity, int page) {}
 
-    /** Hard cap on purchases per shopping trip, so a misparsed GUI can't buy in a loop. */
     private static final int MAX_PURCHASES = 16;
-    /** Ticks to wait after a click before judging whether the item actually arrived. */
     private static final int SETTLE_TICKS = 10;
+    private static final int PAGE_LOAD_TICKS = 12;
 
     private final BuilderConfig config;
     private Pattern pricePattern;
@@ -54,8 +63,17 @@ public class AuctionHouseBuyer {
     private int ticksWaited;
     private int confirmDelay;
     private int settleDelay;
-    private Listing bestListing;
+    private int pageDelay;
+
+    private int currentPage;
+    private int nextPageSlot = -1;
+    private final List<Listing> seen = new ArrayList<>();
+    private Listing chosen;
+    private boolean sawOverHardCap;
+    private boolean sawUnreadable;
     private String lastError;
+    private String spendSummary = "";
+    private double totalSpent;
 
     public AuctionHouseBuyer(BuilderConfig config) {
         this.config = config;
@@ -64,10 +82,10 @@ public class AuctionHouseBuyer {
 
     public void startShopping(MinecraftClient client, Item item, int targetQuantity) {
         try {
-            this.pricePattern = Pattern.compile(config.auctionPriceRegex); // pick up GUI edits
+            this.pricePattern = Pattern.compile(config.auctionPriceRegex);
         } catch (Exception e) {
             phase = Phase.FAILED;
-            lastError = "price pattern is not a valid regex: " + e.getMessage();
+            lastError = "price pattern is not valid regex: " + e.getMessage();
             return;
         }
         this.wanted = item;
@@ -75,9 +93,15 @@ public class AuctionHouseBuyer {
         this.purchases = 0;
         this.stalls = 0;
         this.countAtLastPurchase = countItem(client.player, item);
-        this.bestListing = null;
-        this.lastError = null;
         this.ticksWaited = 0;
+        this.currentPage = 0;
+        this.nextPageSlot = -1;
+        this.seen.clear();
+        this.chosen = null;
+        this.sawOverHardCap = false;
+        this.sawUnreadable = false;
+        this.lastError = null;
+        this.totalSpent = 0;
 
         String command = String.format(config.auctionCommandTemplate, item.getName().getString());
         if (command.startsWith("/")) command = command.substring(1);
@@ -89,122 +113,208 @@ public class AuctionHouseBuyer {
     public void tick(MinecraftClient client) {
         switch (phase) {
             case WAITING_FOR_GUI -> {
-                if (client.currentScreen instanceof GenericContainerScreen screen) {
-                    selectNextListing(client, screen.getScreenHandler());
+                if (screen(client) != null) {
+                    phase = Phase.SCANNING;
                 } else if (++ticksWaited > 100) {
-                    phase = Phase.FAILED;
-                    lastError = "auction GUI never opened -- does '" + config.auctionCommandTemplate
-                            + "' match your server's command?";
+                    fail("auction GUI never opened -- does '" + config.auctionCommandTemplate
+                            + "' match your server's command?");
                 }
             }
-            case CLICKING -> {
-                if (client.currentScreen instanceof GenericContainerScreen screen) {
-                    click(client, screen.getScreenHandler().syncId, bestListing.slotId());
-                    purchases++;
-                    if (config.auctionRequiresConfirmClick) {
-                        confirmDelay = config.auctionConfirmDelayTicks;
-                        phase = Phase.CONFIRMING;
-                    } else {
-                        settleDelay = SETTLE_TICKS;
-                        phase = Phase.SETTLING;
-                    }
-                } else {
-                    finishByInventory(client, "auction GUI closed mid-purchase");
-                }
+            case SCANNING -> doScan(client);
+            case TURNING_PAGE -> {
+                if (--pageDelay <= 0) phase = Phase.SCANNING;
             }
+            case AWAITING_CONFIRMATION -> { /* held until confirmPurchase()/cancel() */ }
+            case CLICKING -> doClick(client);
             case CONFIRMING -> {
                 if (--confirmDelay <= 0) {
-                    if (client.currentScreen instanceof GenericContainerScreen screen) {
-                        click(client, screen.getScreenHandler().syncId, bestListing.slotId());
-                    }
+                    GenericContainerScreen s = screen(client);
+                    if (s != null) click(client, s.getScreenHandler().syncId, chosen.slotId());
                     settleDelay = SETTLE_TICKS;
                     phase = Phase.SETTLING;
                 }
             }
-            case SETTLING -> {
-                if (--settleDelay > 0) return;
-                int now = countItem(client.player, wanted);
-                if (now <= countAtLastPurchase) {
-                    // The click didn't yield anything -- wrong slot, too expensive,
-                    // or the GUI isn't shaped the way the price pattern assumes.
-                    if (++stalls >= 2) {
-                        finishByInventory(client, "purchases are not arriving -- check the price pattern"
-                                + " and whether buying needs a confirm click");
-                        return;
-                    }
-                } else {
-                    stalls = 0;
-                    countAtLastPurchase = now;
-                }
-
-                if (now >= targetQuantity || purchases >= MAX_PURCHASES) {
-                    phase = Phase.DONE;
-                    return;
-                }
-                if (client.currentScreen instanceof GenericContainerScreen screen) {
-                    selectNextListing(client, screen.getScreenHandler());
-                } else {
-                    finishByInventory(client, "auction GUI closed before the order was filled");
-                }
-            }
-            default -> { /* IDLE / DONE / FAILED: nothing until startShopping() runs again */ }
+            case SETTLING -> doSettle(client);
+            default -> { /* IDLE / DONE / FAILED */ }
         }
     }
 
-    private void selectNextListing(MinecraftClient client, ScreenHandler handler) {
-        bestListing = scanForCheapest(handler);
-        if (bestListing != null) {
-            phase = Phase.CLICKING;
-        } else if (sawTooExpensive) {
-            finishByInventory(client, "every listing is over the "
-                    + String.format("%,.0f", config.maxUnitPrice) + "/item cap");
-        } else {
-            finishByInventory(client, "no listing's price could be read -- check the price pattern");
+    // ------------------------------------------------------------ scanning
+
+    private void doScan(MinecraftClient client) {
+        GenericContainerScreen s = screen(client);
+        if (s == null) {
+            finishByInventory(client, "auction GUI closed while reading listings");
+            return;
+        }
+        ScreenHandler handler = s.getScreenHandler();
+        collectListings(handler);
+
+        boolean morePages = config.scanAllPages
+                && currentPage + 1 < config.maxAuctionPages
+                && nextPageSlot >= 0;
+        if (morePages) {
+            currentPage++;
+            click(client, handler.syncId, nextPageSlot);
+            pageDelay = PAGE_LOAD_TICKS;
+            phase = Phase.TURNING_PAGE;
+            return;
+        }
+        chooseCheapest(client);
+    }
+
+    /** Reads every container slot on the current page into `seen`. */
+    private void collectListings(ScreenHandler handler) {
+        if (handler.slots.isEmpty()) return;
+        var containerInventory = handler.slots.get(0).inventory;
+        nextPageSlot = -1;
+
+        for (Slot slot : handler.slots) {
+            // Only the container's own slots are listings. The lower rows are the
+            // player's inventory and must never be clicked as though they were.
+            if (slot.inventory != containerInventory) continue;
+            ItemStack stack = slot.getStack();
+            if (stack.isEmpty()) continue;
+
+            String name = stack.getName().getString().toLowerCase(Locale.ROOT);
+            if (name.contains("next") && (name.contains("page") || name.contains("»") || name.contains(">"))) {
+                nextPageSlot = slot.id;
+                continue;
+            }
+            if (name.contains("previous") || name.contains("back") || name.contains("close")) continue;
+
+            Double unitPrice = extractUnitPrice(stack);
+            if (unitPrice == null) { sawUnreadable = true; continue; }
+            if (unitPrice > config.hardMaxPrice) { sawOverHardCap = true; continue; }
+            seen.add(new Listing(slot.id, unitPrice, stack.getCount(), currentPage));
         }
     }
 
     /**
-     * Ends the trip. Counts as success if anything at all was bought -- a partial
-     * fill still lets the build continue, just not as far.
+     * Picks the single cheapest listing across every page read. Anything above
+     * autoBuyLimit stops here for confirmation rather than being bought.
      */
+    private void chooseCheapest(MinecraftClient client) {
+        chosen = seen.stream()
+                .filter(l -> l.page() == currentPage) // only the page we're looking at is clickable
+                .min((a, b) -> Double.compare(a.unitPrice(), b.unitPrice()))
+                .orElse(null);
+
+        Listing cheapestAnywhere = seen.stream()
+                .min((a, b) -> Double.compare(a.unitPrice(), b.unitPrice()))
+                .orElse(null);
+
+        if (cheapestAnywhere == null) {
+            if (sawOverHardCap) {
+                fail("every listing is over the hard cap of "
+                        + String.format("%,.0f", config.hardMaxPrice) + " per item");
+            } else if (sawUnreadable) {
+                fail("no listing's price could be read -- check the price pattern");
+            } else {
+                fail("no listings found for " + wanted.getName().getString());
+            }
+            return;
+        }
+
+        // The cheapest may be on an earlier page; only the page currently open can
+        // be clicked, so buy the best on this page and let the loop come back round.
+        if (chosen == null) chosen = cheapestAnywhere;
+
+        if (chosen.unitPrice() > config.autoBuyLimit) {
+            if (!config.confirmExpensivePurchases) {
+                fail("cheapest is " + String.format("%,.0f", chosen.unitPrice())
+                        + "/item, over the " + String.format("%,.0f", config.autoBuyLimit) + " limit");
+                return;
+            }
+            phase = Phase.AWAITING_CONFIRMATION;
+            return;
+        }
+        phase = Phase.CLICKING;
+    }
+
+    // ------------------------------------------------------------ buying
+
+    private void doClick(MinecraftClient client) {
+        GenericContainerScreen s = screen(client);
+        if (s == null) {
+            finishByInventory(client, "auction GUI closed mid-purchase");
+            return;
+        }
+        click(client, s.getScreenHandler().syncId, chosen.slotId());
+        purchases++;
+        totalSpent += chosen.unitPrice() * chosen.quantity();
+        if (config.auctionRequiresConfirmClick) {
+            confirmDelay = config.auctionConfirmDelayTicks;
+            phase = Phase.CONFIRMING;
+        } else {
+            settleDelay = SETTLE_TICKS;
+            phase = Phase.SETTLING;
+        }
+    }
+
+    private void doSettle(MinecraftClient client) {
+        if (--settleDelay > 0) return;
+        int now = countItem(client.player, wanted);
+
+        if (now <= countAtLastPurchase) {
+            // Nothing arrived: wrong slot, insufficient funds, or the GUI isn't
+            // shaped the way the price pattern assumes.
+            if (++stalls >= 2) {
+                finishByInventory(client, "purchases aren't arriving -- check the price pattern"
+                        + " and whether buying needs a confirm click");
+                return;
+            }
+        } else {
+            stalls = 0;
+            countAtLastPurchase = now;
+        }
+
+        if (now >= targetQuantity || purchases >= MAX_PURCHASES) {
+            spendSummary = String.format("bought %dx %s for ~%,.0f",
+                    now, wanted.getName().getString(), totalSpent);
+            phase = Phase.DONE;
+            return;
+        }
+        if (screen(client) != null) {
+            seen.clear();
+            currentPage = 0;
+            phase = Phase.SCANNING;
+        } else {
+            finishByInventory(client, "auction GUI closed before the order was filled");
+        }
+    }
+
+    /** Called from the GUI when the player approves a listing over the auto-buy limit. */
+    public void confirmPurchase() {
+        if (phase == Phase.AWAITING_CONFIRMATION) phase = Phase.CLICKING;
+    }
+
+    /** Called from the GUI to decline an expensive listing. */
+    public void declinePurchase() {
+        if (phase == Phase.AWAITING_CONFIRMATION) {
+            fail("purchase declined at " + String.format("%,.0f", chosen.unitPrice()) + "/item");
+        }
+    }
+
     private void finishByInventory(MinecraftClient client, String reason) {
         if (countItem(client.player, wanted) > 0 && purchases > 0) {
             phase = Phase.DONE;
         } else {
-            phase = Phase.FAILED;
-            lastError = reason;
+            fail(reason);
         }
+    }
+
+    private void fail(String reason) {
+        phase = Phase.FAILED;
+        lastError = reason;
+    }
+
+    private GenericContainerScreen screen(MinecraftClient client) {
+        return client.currentScreen instanceof GenericContainerScreen s ? s : null;
     }
 
     private void click(MinecraftClient client, int syncId, int slotId) {
         client.interactionManager.clickSlot(syncId, slotId, 0, SlotActionType.PICKUP, client.player);
-    }
-
-    private boolean sawTooExpensive;
-
-    private Listing scanForCheapest(ScreenHandler handler) {
-        Listing best = null;
-        sawTooExpensive = false;
-        for (Slot slot : handler.slots) {
-            // Only the container's own slots are listings; the lower rows are the
-            // player's own inventory and must never be clicked as if they were.
-            if (slot.inventory == handler.slots.get(0).inventory) {
-                ItemStack stack = slot.getStack();
-                if (stack.isEmpty()) continue;
-                Double unitPrice = extractUnitPrice(stack);
-                // A listing whose price can't be read is never bought: an
-                // unparseable price is treated as too expensive, not as free.
-                if (unitPrice == null) continue;
-                if (unitPrice > config.maxUnitPrice) {
-                    sawTooExpensive = true;
-                    continue;
-                }
-                if (best == null || unitPrice < best.unitPrice()) {
-                    best = new Listing(slot.id, unitPrice, stack.getCount());
-                }
-            }
-        }
-        return best;
     }
 
     private Double extractUnitPrice(ItemStack stack) {
@@ -236,16 +346,28 @@ public class AuctionHouseBuyer {
     }
 
     public boolean active() {
-        return phase == Phase.WAITING_FOR_GUI || phase == Phase.CLICKING
-                || phase == Phase.CONFIRMING || phase == Phase.SETTLING;
+        return phase != Phase.IDLE && phase != Phase.DONE && phase != Phase.FAILED;
+    }
+
+    /** True while blocked on the player approving an over-limit purchase. */
+    public boolean awaitingConfirmation() {
+        return phase == Phase.AWAITING_CONFIRMATION;
+    }
+
+    public String confirmationPrompt() {
+        if (chosen == null || wanted == null) return "";
+        return String.format("%s at %,.0f each (%d in stack) -- over the %,.0f limit",
+                wanted.getName().getString(), chosen.unitPrice(), chosen.quantity(), config.autoBuyLimit);
     }
 
     public void reset() {
         phase = Phase.IDLE;
-        bestListing = null;
+        chosen = null;
+        seen.clear();
     }
 
     public Phase getPhase() { return phase; }
     public String getLastError() { return lastError; }
-    public Listing getBestListing() { return bestListing; }
+    public String getSpendSummary() { return spendSummary; }
+    public Listing getChosen() { return chosen; }
 }

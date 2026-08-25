@@ -9,6 +9,7 @@ import dev.autobuilder.planner.BuildPlanner.BlockPlacement;
 import dev.autobuilder.planner.BuildPlanner.Plan;
 import dev.autobuilder.schematic.SchematicSource;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -36,7 +37,9 @@ import java.util.*;
 public class BuildExecutor {
 
     public enum State { IDLE, PLANNING, RUNNING, PAUSED, DONE, FAILED }
-    private enum Step { NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, BREAK, PLACE, DWELL, REST, SKIP }
+    private enum Step {
+        NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, BREAK, PLACE, DWELL, RETRY_WAIT, REST, SKIP
+    }
 
     private final BuilderConfig config;
     private final SchematicSource schematic;
@@ -71,11 +74,17 @@ public class BuildExecutor {
     private HumanMotion.LookState walkGaze;
     private int walkGazeTicks;
 
+    private boolean verifyPassDone;
+    private boolean returningHome;
+    private BlockPos homePosition;
+    private int retriesOnCurrent;
+    private int consecutiveFailures;
+
     public BuildExecutor(BuilderConfig config, SchematicSource schematic) {
         this.config = config;
         this.schematic = schematic;
         this.auctionBuyer = new AuctionHouseBuyer(config);
-        this.motion = new HumanMotion(config.pace);
+        this.motion = new HumanMotion(config);
     }
 
     public void start(MinecraftClient client) {
@@ -83,7 +92,12 @@ public class BuildExecutor {
             statusMessage = "no schematic loaded";
             return;
         }
-        this.motion = new HumanMotion(config.pace); // pick up any pace change from the GUI
+        this.verifyPassDone = false;
+        this.returningHome = false;
+        this.retriesOnCurrent = 0;
+        this.consecutiveFailures = 0;
+        this.homePosition = client.player != null ? client.player.getBlockPos() : null;
+        this.motion = new HumanMotion(config); // pick up any pace change from the GUI
         this.unbuyable.clear();
         this.blocksSinceBreak = 0;
         this.nextBreakAt = jitteredBreakInterval();
@@ -107,6 +121,13 @@ public class BuildExecutor {
     public String getStatusMessage() { return statusMessage; }
     public int getPlacedCount() { return placedCount; }
     public int getTotalCount() { return plan == null ? 0 : plan.order().size(); }
+    public int getSkippedCount() { return skipped.size(); }
+    public int getFatiguePercent() { return (int) Math.round(motion.fatigue() * 100); }
+
+    public boolean isAwaitingPurchaseConfirmation() { return auctionBuyer.awaitingConfirmation(); }
+    public String getPurchasePrompt() { return auctionBuyer.confirmationPrompt(); }
+    public void confirmPurchase() { auctionBuyer.confirmPurchase(); }
+    public void declinePurchase() { auctionBuyer.declinePurchase(); }
 
     /** Call once per client tick (client.player/world guaranteed non-null by caller). */
     public void tick(MinecraftClient client) {
@@ -124,9 +145,15 @@ public class BuildExecutor {
         Map<BlockPos, BlockState> target = schematic.getTargetBlocks();
         Map<BlockPos, BlockState> toPlace = new HashMap<>();
         for (var entry : target.entrySet()) {
+            BlockState wanted = entry.getValue();
+            if (config.skipFluids && !wanted.getFluidState().isEmpty()) continue;
+            // Chests/signs would be placed empty -- their contents aren't read
+            // from the schematic -- so there's an option to leave them out.
+            if (config.skipBlockEntities && wanted.hasBlockEntity()) continue;
+
             BlockState current = client.world.getBlockState(entry.getKey());
-            if (!current.equals(entry.getValue())) {
-                toPlace.put(entry.getKey(), entry.getValue());
+            if (!current.equals(wanted)) {
+                toPlace.put(entry.getKey(), wanted);
             }
         }
 
@@ -143,12 +170,21 @@ public class BuildExecutor {
         BuildPlanner planner = new BuildPlanner(config);
         plan = planner.plan(toPlace, worldSolid, player.getBlockPos());
         placementIndex = 0;
-        placedCount = 0;
-        skipped.clear();
+        retriesOnCurrent = 0;
+        consecutiveFailures = 0;
+        // A verify pass keeps the running totals -- it's the same build continuing,
+        // not a new one.
+        if (!verifyPassDone) {
+            placedCount = 0;
+            skipped.clear();
+        }
 
         if (plan.order().isEmpty()) {
+            resetInputs();
             state = State.DONE;
-            statusMessage = "nothing to build -- world already matches the schematic";
+            statusMessage = verifyPassDone
+                    ? "complete and verified: " + placedCount + " placed"
+                    : "nothing to build -- world already matches the schematic";
             return;
         }
 
@@ -168,9 +204,26 @@ public class BuildExecutor {
         }
 
         if (placementIndex >= plan.order().size()) {
+            // A verify pass re-diffs the schematic against the world and replans
+            // whatever is still missing: placements can silently fail (server
+            // rejection, a mob in the way, a mistimed click), and the only honest
+            // way to know the build is actually complete is to look again.
+            if (config.verifyPass && !verifyPassDone) {
+                verifyPassDone = true;
+                statusMessage = "verifying -- re-checking for missed blocks";
+                state = State.PLANNING;
+                return;
+            }
+            if (config.returnHomeWhenDone && homePosition != null
+                    && !player.getBlockPos().isWithinDistance(homePosition, 2.0)) {
+                returningHome = true;
+                handleNavigateTo(client, player, homePosition);
+                return;
+            }
             resetInputs();
             state = State.DONE;
-            statusMessage = "build complete: " + placedCount + " placed, " + skipped.size() + " skipped";
+            statusMessage = "complete: " + placedCount + " placed"
+                    + (skipped.isEmpty() ? "" : ", " + skipped.size() + " skipped");
             player.sendMessage(Text.translatable("autobuilder.chat.build_done", placedCount), false);
             return;
         }
@@ -186,6 +239,9 @@ public class BuildExecutor {
             case BREAK -> handleBreak(client, bp);
             case PLACE -> handlePlace(client, player, bp);
             case DWELL -> handleDwell(player);
+            case RETRY_WAIT -> {
+                if (waitTicks-- <= 0) step = Step.ALIGN;
+            }
             case REST -> handleRest(player);
             case SKIP -> advance(false);
         }
@@ -200,6 +256,9 @@ public class BuildExecutor {
                 && System.currentTimeMillis() - buildStartedAtMs > config.maxBuildMinutes * 60_000L) {
             return "hit the " + config.maxBuildMinutes + " minute time limit";
         }
+        if (config.stopOnLowHunger && player.getHungerManager().getFoodLevel() <= config.lowHungerThreshold) {
+            return "hunger below " + config.lowHungerThreshold;
+        }
         if (config.stopOnPlayerNearby && client.world != null) {
             double radiusSq = (double) config.stopOnPlayerRadius * config.stopOnPlayerRadius;
             for (PlayerEntity other : client.world.getPlayers()) {
@@ -209,7 +268,21 @@ public class BuildExecutor {
                 }
             }
         }
+        if (config.stopWhenInventoryFull && isInventoryFull(player)) {
+            return "inventory is full";
+        }
+        if (consecutiveFailures >= config.stopAfterConsecutiveFailures) {
+            return consecutiveFailures + " placements in a row failed -- something is wrong";
+        }
         return null;
+    }
+
+    private boolean isInventoryFull(ClientPlayerEntity player) {
+        var inventory = player.getInventory();
+        for (int i = 0; i < inventory.size(); i++) {
+            if (inventory.getStack(i).isEmpty()) return false;
+        }
+        return true;
     }
 
     /**
@@ -240,12 +313,11 @@ public class BuildExecutor {
     private void handleNavigate(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (path.isEmpty() && pathIndex == 0) {
             BlockPos standGoal = computeStandPosition(bp);
-            PathFinder finder = new PathFinder(
-                    pos -> isStandable(client, pos), config.usePearlClimbing, 32);
-            path = finder.findPath(player.getBlockPos(), standGoal, config.maxPathNodes);
+            path = buildPath(client, player, standGoal);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
                 skipped.add(bp);
+                consecutiveFailures++;
                 resetInputs();
                 advance(false);
                 return;
@@ -259,7 +331,38 @@ public class BuildExecutor {
             step = Step.ALIGN;
             return;
         }
+        walkOneStep(client, player);
+    }
 
+    /** Walking used both for reaching a block and for heading home afterwards. */
+    private void handleNavigateTo(MinecraftClient client, ClientPlayerEntity player, BlockPos goal) {
+        if (path.isEmpty() && pathIndex == 0) {
+            path = buildPath(client, player, goal);
+            if (path.isEmpty()) {
+                returningHome = false;
+                resetInputs();
+                state = State.DONE;
+                statusMessage = "complete (couldn't find a way back to the start)";
+                return;
+            }
+        }
+        if (pathIndex >= path.size()) {
+            returningHome = false;
+            resetInputs();
+            state = State.DONE;
+            statusMessage = "complete: " + placedCount + " placed, back at the start";
+            return;
+        }
+        walkOneStep(client, player);
+    }
+
+    private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player, BlockPos goal) {
+        PathFinder finder = new PathFinder(
+                pos -> isStandable(client, pos), config.usePearlClimbing, 32);
+        return finder.findPath(player.getBlockPos(), goal, config.maxPathNodes);
+    }
+
+    private void walkOneStep(MinecraftClient client, ClientPlayerEntity player) {
         PathFinder.PathStep current = path.get(pathIndex);
         if (current.type() == PathFinder.StepType.PEARL_CLIMB) {
             pearlLandingTarget = current.pos();
@@ -268,13 +371,30 @@ public class BuildExecutor {
         }
 
         stepToward(client, player, current.pos());
-        if (current.type() == PathFinder.StepType.JUMP && player.isOnGround()) {
+        if (config.allowJump && current.type() == PathFinder.StepType.JUMP && player.isOnGround()) {
             client.options.jumpKey.setPressed(true);
         }
+        // Sneak when there's a drop next to the next step, so a mistimed input
+        // doesn't walk off the edge of what's being built.
+        client.options.sneakKey.setPressed(config.sneakNearEdges && nextToDrop(client, current.pos()));
+
         if (player.getBlockPos().isWithinDistance(current.pos(), 0.5)) {
             client.options.jumpKey.setPressed(false);
             pathIndex++;
         }
+    }
+
+    /** True if any block orthogonally adjacent to this one has nothing solid beneath it. */
+    private boolean nextToDrop(MinecraftClient client, BlockPos pos) {
+        var world = client.world;
+        for (Direction d : Direction.Type.HORIZONTAL) {
+            BlockPos neighbor = pos.offset(d).down();
+            if (world.getBlockState(neighbor).isAir()
+                    && world.getBlockState(neighbor.down()).isAir()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private BlockPos computeStandPosition(BlockPlacement bp) {
@@ -289,9 +409,27 @@ public class BuildExecutor {
 
     private boolean isStandable(MinecraftClient client, BlockPos feet) {
         var world = client.world;
-        return !world.getBlockState(feet).isSolidBlock(world, feet)
-                && !world.getBlockState(feet.up()).isSolidBlock(world, feet.up())
-                && world.getBlockState(feet.down()).isSolidBlock(world, feet.down());
+        if (world.getBlockState(feet).isSolidBlock(world, feet)) return false;
+        if (world.getBlockState(feet.up()).isSolidBlock(world, feet.up())) return false;
+        if (!world.getBlockState(feet.down()).isSolidBlock(world, feet.down())) return false;
+
+        if (config.avoidHazards) {
+            if (isHazard(client, feet) || isHazard(client, feet.up()) || isHazard(client, feet.down())) {
+                return false;
+            }
+            // Don't stand right next to lava either -- close enough to burn.
+            for (Direction d : Direction.Type.HORIZONTAL) {
+                if (isHazard(client, feet.offset(d))) return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isHazard(MinecraftClient client, BlockPos pos) {
+        BlockState state = client.world.getBlockState(pos);
+        return state.isOf(Blocks.LAVA) || state.isOf(Blocks.FIRE)
+                || state.isOf(Blocks.MAGMA_BLOCK) || state.isOf(Blocks.CAMPFIRE)
+                || state.isOf(Blocks.SWEET_BERRY_BUSH) || state.isOf(Blocks.POWDER_SNOW);
     }
 
     // -- PEARL CLIMB -----------------------------------------------------
@@ -480,8 +618,29 @@ public class BuildExecutor {
         BlockHitResult hit = new BlockHitResult(hitPos, face, bp.supportNeighbor(), false);
         client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
         player.swingHand(Hand.MAIN_HAND);
-        placedCount++;
         motion.noteAction();
+
+        // Did it actually land? A click can be rejected by the server, blocked by
+        // an entity, or mis-aimed, and counting it as placed regardless would make
+        // the progress figure a lie.
+        BlockState now = client.world.getBlockState(bp.pos());
+        if (now.isAir() && retriesOnCurrent < config.maxRetriesPerBlock) {
+            retriesOnCurrent++;
+            consecutiveFailures++;
+            // Re-aim and try the same block again rather than moving on --
+            // DWELL would advance the index.
+            waitTicks = motion.reactionDelayTicks();
+            step = Step.RETRY_WAIT;
+            return;
+        }
+        if (!now.isAir()) {
+            placedCount++;
+            consecutiveFailures = 0;
+        } else {
+            skipped.add(bp);
+            consecutiveFailures++;
+        }
+        retriesOnCurrent = 0;
 
         // Often look ahead to where the next block goes while the hands catch up.
         glanceTarget = null;

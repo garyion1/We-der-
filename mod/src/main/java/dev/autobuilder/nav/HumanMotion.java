@@ -26,6 +26,7 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public class HumanMotion {
 
+    private final BuilderConfig config;
     private final BuilderConfig.Pace pace;
     private final ThreadLocalRandom rng = ThreadLocalRandom.current();
 
@@ -37,8 +38,9 @@ public class HumanMotion {
     private double driftPhaseYaw = Math.random() * Math.PI * 2;
     private double driftPhasePitch = Math.random() * Math.PI * 2;
 
-    public HumanMotion(BuilderConfig.Pace pace) {
-        this.pace = pace;
+    public HumanMotion(BuilderConfig config) {
+        this.config = config;
+        this.pace = config.pace;
     }
 
     public void noteAction() {
@@ -47,7 +49,18 @@ public class HumanMotion {
 
     /** 0 at the start of a session, 1 once thoroughly worn down. */
     public double fatigue() {
+        if (!config.simulateFatigue) return 0;
         return Math.min(1.0, actionsDone / (double) FATIGUE_FULL_AT);
+    }
+
+    /** Scales every random spread; 0% makes timing and aim near-deterministic. */
+    private double jitter() {
+        return config.jitterPercent / 100.0;
+    }
+
+    /** Global multiplier on delays, on top of pace. */
+    private double speedScale() {
+        return config.speedPercent / 100.0;
     }
 
     private double fatigueSpeedFactor() {
@@ -64,10 +77,10 @@ public class HumanMotion {
     public int dwellTicks() {
         double mean = (pace.minDwellMs + pace.maxDwellMs) / 2.0;
         double spread = (pace.maxDwellMs - pace.minDwellMs) / 2.0;
-        double ms = mean + rng.nextGaussian() * spread * 0.6;
+        double ms = mean + rng.nextGaussian() * spread * 0.6 * jitter();
         // Every so often something distracts a person for a beat longer.
-        if (rng.nextDouble() < 0.08) ms *= rng.nextDouble(1.8, 3.5);
-        ms = Math.max(pace.minDwellMs * 0.5, ms) * fatigueDelayFactor();
+        if (rng.nextDouble() < 0.08 * jitter()) ms *= rng.nextDouble(1.8, 3.5);
+        ms = Math.max(pace.minDwellMs * 0.5, ms) * fatigueDelayFactor() * speedScale();
         return Math.max(1, (int) Math.round(ms / 50.0));
     }
 
@@ -88,13 +101,14 @@ public class HumanMotion {
 
     /** Baseline think-time before starting a placement, on top of dwell. */
     public int reactionDelayTicks() {
-        double ms = rng.nextDouble(120, 380) * pace.actionDelayScale * fatigueDelayFactor();
+        double ms = rng.nextDouble(120, 380) * pace.actionDelayScale * fatigueDelayFactor() * speedScale();
         return Math.max(1, (int) Math.round(ms / 50.0));
     }
 
     /** Break length around the configured seconds -- never exactly the same twice. */
     public int breakTicks(int configuredSeconds) {
-        double seconds = configuredSeconds * rng.nextDouble(0.65, 1.5) * fatigueDelayFactor();
+        double spread = 0.35 * jitter();
+        double seconds = configuredSeconds * rng.nextDouble(1 - spread, 1 + spread * 1.4) * fatigueDelayFactor();
         return Math.max(20, (int) Math.round(seconds * 20));
     }
 
@@ -139,8 +153,8 @@ public class HumanMotion {
 
     /** Sub-degree hand tremor -- always on, so the crosshair is never perfectly still. */
     private LookState applyTremor(LookState state) {
-        float yaw = state.yaw() + (float) (rng.nextGaussian() * 0.075);
-        float pitch = state.pitch() + (float) (rng.nextGaussian() * 0.055);
+        float yaw = state.yaw() + (float) (rng.nextGaussian() * 0.075 * jitter());
+        float pitch = state.pitch() + (float) (rng.nextGaussian() * 0.055 * jitter());
         return new LookState(wrapDegrees(yaw), clampPitch(pitch));
     }
 
