@@ -143,7 +143,7 @@ public class BuilderConfig {
         }
     }
 
-    public Pace pace = Pace.NORMAL;
+    public Pace pace = Pace.BRISK;
     /** Pause periodically, the way someone building for an hour actually would. */
     public boolean takeBreaks = true;
     public int breakEveryBlocks = 128;

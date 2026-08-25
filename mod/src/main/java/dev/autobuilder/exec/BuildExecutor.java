@@ -69,11 +69,6 @@ public class BuildExecutor {
     private int nextBreakAt = Integer.MAX_VALUE;
     private long buildStartedAtMs;
     private HumanMotion.LookState restGazeTarget;
-    /** Where to glance while dwelling, when the builder looks ahead to the next block. */
-    private HumanMotion.LookState glanceTarget;
-    /** A brief look away from the path while walking, and how long it lasts. */
-    private HumanMotion.LookState walkGaze;
-    private int walkGazeTicks;
 
     private boolean verifyPassDone;
     private BlockPos homePosition;
@@ -952,45 +947,15 @@ public class BuildExecutor {
         }
         retriesOnCurrent = 0;
 
-        // Often look ahead to where the next block goes while the hands catch up.
-        glanceTarget = null;
-        if (motion.shouldGlanceAhead() && placementIndex + 1 < plan.order().size()) {
-            glanceTarget = aimAt(player, plan.order().get(placementIndex + 1).pos());
-        }
-
         waitTicks = motion.dwellTicks();
         step = Step.DWELL;
     }
 
-    /**
-     * The beat after placing a block. Rather than staring at the block just
-     * placed, the aim often drifts toward wherever the next one goes -- people
-     * look where they're about to work before they get there.
-     */
+    /** The beat after placing a block, before moving on to the next one. */
     private void handleDwell(ClientPlayerEntity player) {
-        if (glanceTarget != null) {
-            look = motion.stepLook(look, glanceTarget.yaw(), glanceTarget.pitch());
-        } else {
-            look = motion.idleDrift(look);
-        }
-        player.setYaw(look.yaw());
-        player.setPitch(look.pitch());
-
         if (waitTicks-- <= 0) {
-            glanceTarget = null;
             advance(true);
         }
-    }
-
-    /** Aim that would look at the next planned block, for the anticipatory glance. */
-    private HumanMotion.LookState aimAt(ClientPlayerEntity player, BlockPos target) {
-        Vec3d eye = player.getEyePos();
-        Vec3d center = Vec3d.ofCenter(target);
-        double dx = center.x - eye.x, dy = center.y - eye.y, dz = center.z - eye.z;
-        double horizontal = Math.sqrt(dx * dx + dz * dz);
-        return new HumanMotion.LookState(
-                (float) Math.toDegrees(Math.atan2(dz, dx)) - 90f,
-                (float) -Math.toDegrees(Math.atan2(dy, horizontal)));
     }
 
     private void advance(boolean placedOk) {
@@ -1024,19 +989,7 @@ public class BuildExecutor {
         double dx = targetCenter.x - player.getX(), dz = targetCenter.z - player.getZ();
         float targetYaw = (float) Math.toDegrees(Math.atan2(dz, dx)) - 90f;
 
-        // Glance around occasionally while walking rather than staring at the
-        // destination the whole way. The gaze returns on its own next tick,
-        // since the walk target keeps pulling the aim back.
-        if (walkGaze != null) {
-            look = motion.stepLook(look, walkGaze.yaw(), walkGaze.pitch());
-            if (--walkGazeTicks <= 0) walkGaze = null;
-        } else {
-            if (motion.shouldScanSurroundings()) {
-                walkGaze = motion.wanderTarget(look);
-                walkGazeTicks = 10 + (int) (Math.random() * 20);
-            }
-            look = motion.stepLook(look, targetYaw, Math.max(-25f, Math.min(15f, look.pitch())));
-        }
+        look = motion.stepLook(look, targetYaw, Math.max(-25f, Math.min(15f, look.pitch())));
         player.setYaw(look.yaw());
         player.setPitch(look.pitch());
 

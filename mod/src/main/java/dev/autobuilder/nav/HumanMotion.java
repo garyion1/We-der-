@@ -89,16 +89,6 @@ public class HumanMotion {
         return rng.nextDouble() < 0.06 + 0.10 * fatigue();
     }
 
-    /** Look ahead at where the next block goes before finishing this one. */
-    public boolean shouldGlanceAhead() {
-        return rng.nextDouble() < 0.22;
-    }
-
-    /** Glance around at the surroundings mid-walk, rather than staring dead ahead. */
-    public boolean shouldScanSurroundings() {
-        return rng.nextDouble() < 0.05;
-    }
-
     /** Baseline think-time before starting a placement, on top of dwell. */
     public int reactionDelayTicks() {
         double ms = rng.nextDouble(120, 380) * pace.actionDelayScale * fatigueDelayFactor() * speedScale();
