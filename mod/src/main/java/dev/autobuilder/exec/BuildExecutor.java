@@ -304,7 +304,8 @@ public class BuildExecutor {
             resetInputs();
             String done = "complete: " + placedCount + " placed"
                     + (skipped.isEmpty() ? "" : ", " + skipped.size() + " skipped");
-            player.sendMessage(Text.translatable("autobuilder.chat.build_done", placedCount), false);
+            player.sendMessage(Text.literal("[Auto Builder] complete: " + placedCount + " placed"
+                    + (skipped.isEmpty() ? "" : ", " + skipped.size() + " skipped")), false);
             if (beginReturnHomeIfWanted(player, done)) return;
             state = State.DONE;
             statusMessage = done;
@@ -560,13 +561,15 @@ public class BuildExecutor {
     }
 
     private BlockPos computeStandPosition(BlockPlacement bp) {
-        Direction away = bp.clickFace() != null ? bp.clickFace() : Direction.UP;
-        // Stand back by (reach - 1) so the target face is comfortably inside reach
-        // rather than right at its limit, where small drift makes placement fail.
-        int standoff = Math.max(1, (int) Math.floor(config.maxReach) - 1);
-        return bp.supportNeighbor() != null
-                ? bp.supportNeighbor().offset(away, standoff)
-                : bp.pos().down();
+        // For removals or blocks with unknown support: stand one below the target
+        // (can reach up to break or click), and let the pathfinder handle routing.
+        if (bp.supportNeighbor() == null || bp.isRemoval()) return bp.pos().down();
+        // Support is ABOVE the target (placing underneath something): stand two below.
+        if (bp.clickFace() == Direction.DOWN) return bp.pos().down(2);
+        // Common case (support below, clickFace=UP, or side support): navigate to the
+        // target position itself. It's empty before placement, the support neighbour
+        // is always adjacent, and any face of it is within the 4-block reach from there.
+        return bp.pos();
     }
 
     private boolean isStandable(MinecraftClient client, BlockPos feet) {
@@ -607,10 +610,8 @@ public class BuildExecutor {
         int pearlCount = countItem(player, Items.ENDER_PEARL);
         if (pearlSlot < 0 || pearlCount <= config.pearlReserve) {
             statusMessage = "out of ender pearls (reserve=" + config.pearlReserve + ") -- can't climb, skipping block";
-            skipped.add(plan.order().get(placementIndex));
-            step = Step.NAVIGATE;
-            path = List.of();
-            pathIndex++;
+            consecutiveFailures++;
+            advance(false);
             return;
         }
         selectHotbarSlot(player, pearlSlot);
@@ -701,6 +702,13 @@ public class BuildExecutor {
             return;
         }
         Item needed = bp.state().getBlock().asItem();
+        // Some blocks (fire, fluids that slipped through skipFluids) have no placeable
+        // item form. asItem() returns AIR, which would incorrectly match empty hotbar slots.
+        if (needed == null || needed == net.minecraft.item.Items.AIR) {
+            skipped.add(bp);
+            advance(false);
+            return;
+        }
         int hotbarSlot = findHotbarOrInventorySlot(player, needed);
         if (hotbarSlot >= 0) {
             selectHotbarSlot(player, hotbarSlot);
@@ -794,7 +802,13 @@ public class BuildExecutor {
     private void handleBreak(MinecraftClient client, BlockPlacement bp) {
         if (client.world.getBlockState(bp.pos()).isAir()) {
             breakTicks = 0;
-            step = Step.PLACE;
+            if (bp.isRemoval()) {
+                // Nothing left to place -- the removal is done.
+                consecutiveFailures = 0;
+                advance(false);
+            } else {
+                step = Step.PLACE;
+            }
             return;
         }
         // Bedrock, a protected region, or the wrong tool would otherwise keep this
@@ -813,6 +827,13 @@ public class BuildExecutor {
     }
 
     private void handlePlace(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
+        if (bp.supportNeighbor() == null || bp.clickFace() == null) {
+            // Stranded block with no computed support -- can't place it. Skip.
+            skipped.add(bp);
+            consecutiveFailures++;
+            advance(false);
+            return;
+        }
         Direction face = bp.clickFace();
         Vec3d hitPos = Vec3d.ofCenter(bp.supportNeighbor())
                 .add(face.getOffsetX() * 0.5, face.getOffsetY() * 0.5, face.getOffsetZ() * 0.5);
