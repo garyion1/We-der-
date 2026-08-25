@@ -591,7 +591,16 @@ public class BuildExecutor {
     }
 
     private BlockPos computeStandPosition(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
-        if (bp.supportNeighbor() == null || bp.isRemoval()) return bp.pos().down();
+        if (bp.supportNeighbor() == null || bp.isRemoval()) {
+            // Directly below, looking up, is the natural spot to break a block --
+            // but unlike the other branches below, this was never actually
+            // checked for standability. A removal target sitting over a hole or
+            // hazard would silently fail to path every time. Fall back to a
+            // horizontal neighbour the same way an UP-face placement does.
+            BlockPos below = bp.pos().down();
+            if (isStandable(client, below)) return below;
+            return closestStandableNeighbor(client, player, bp.pos(), below);
+        }
         Direction face = bp.clickFace();
         if (face == null) return bp.pos().down();
 

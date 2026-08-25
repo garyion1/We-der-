@@ -36,7 +36,7 @@ public class BuildOptionsScreen extends Screen {
 
     private static final String[] TABS = {"Build", "Move", "Timing", "Buying", "Safety", "Items", "Status"};
 
-    private static final int PANEL_W = 400;
+    private static final int MAX_PANEL_W = 400;
     private static final int ROW_H = 26;
     private static final int TAB_H = 24;
     private static final int MIN_ROW_H = 15;
@@ -115,6 +115,8 @@ public class BuildOptionsScreen extends Screen {
     private int contentBottom;
     private int schematicStatusY = -1;
     private int panelLeft, panelTop;
+    /** Clamped to the actual screen width in init() -- see there for why. */
+    private int panelW;
 
     private void head(String text) { rows.add(new Row(RowKind.HEADER, text, null, null, null, null, null)); }
     private void statusLine() { rows.add(new Row(RowKind.STATUS_LINE, null, null, null, null, null, null)); }
@@ -139,12 +141,17 @@ public class BuildOptionsScreen extends Screen {
         clickZones.clear();
         tabZones.clear();
 
-        int left = this.width / 2 - PANEL_W / 2;
+        // Cap the panel to the actual window: at a small window size combined
+        // with a high GUI Scale, the scaled screen width can drop well below
+        // a fixed panel width, pushing part of the panel (including the
+        // leftmost tab and the Start button) off-screen and unreachable.
+        panelW = Math.max(180, Math.min(MAX_PANEL_W, this.width - 24));
+        int left = Math.max(4, this.width / 2 - panelW / 2);
         int top = 28;
         panelLeft = left;
         panelTop = top;
 
-        int tabW = PANEL_W / TABS.length;
+        int tabW = panelW / TABS.length;
         for (int i = 0; i < TABS.length; i++) {
             tabZones.add(new int[]{left + i * tabW, tabW - 2});
         }
@@ -162,19 +169,19 @@ public class BuildOptionsScreen extends Screen {
         layoutRows(left, top + TAB_H + 10);
 
         if (tab == 6 && executor.isAwaitingPurchaseConfirmation()) {
-            int halfW = PANEL_W / 2 - 3;
+            int halfW = panelW / 2 - 3;
             clickZones.add(new ClickZone(left, approveY(), halfW, BUTTON_H,
                     "Approve purchase", ButtonStyle.PRIMARY, executor::confirmPurchase));
-            clickZones.add(new ClickZone(left + PANEL_W / 2 + 3, approveY(), halfW, BUTTON_H,
+            clickZones.add(new ClickZone(left + panelW / 2 + 3, approveY(), halfW, BUTTON_H,
                     "Decline", ButtonStyle.DANGER, executor::declinePurchase));
         }
 
         // Four even buttons spanning the panel width, with a 3px gutter between
-        // each -- computed from PANEL_W rather than hardcoded so a wider panel
+        // each -- computed from panelW rather than hardcoded so a wider panel
         // gets wider, easier-to-hit buttons instead of a fixed narrow strip.
         int controlY = controlY();
         int gutter = 3;
-        int btnW = (PANEL_W - gutter * 3) / 4;
+        int btnW = (panelW - gutter * 3) / 4;
         clickZones.add(new ClickZone(left, controlY, btnW, BUTTON_H, "Start", ButtonStyle.PRIMARY, () -> {
             applyPending();
             // Only close if it actually started -- closing unconditionally made a
@@ -230,13 +237,13 @@ public class BuildOptionsScreen extends Screen {
                     y += rowH;
                 }
                 case OPTION -> {
-                    placedOptions.add(new Placed(row, x, y, PANEL_W, widgetH));
+                    placedOptions.add(new Placed(row, x, y, panelW, widgetH));
                     y += rowH;
                 }
                 case FIELD -> {
-                    TextFieldWidget widget = row.fieldFactory().make(x, y, PANEL_W, widgetH);
+                    TextFieldWidget widget = row.fieldFactory().make(x, y, panelW, widgetH);
                     addDrawableChild(widget);
-                    placedOptions.add(new Placed(row, x, y, PANEL_W, widgetH));
+                    placedOptions.add(new Placed(row, x, y, panelW, widgetH));
                     y += rowH;
                 }
             }
@@ -463,7 +470,7 @@ public class BuildOptionsScreen extends Screen {
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         int left = panelLeft;
-        int px1 = left - 10, py1 = 20, px2 = left + PANEL_W + 10, py2 = this.height - 4;
+        int px1 = left - 10, py1 = 20, px2 = left + panelW + 10, py2 = this.height - 4;
 
         // Dim the game behind the panel so it reads as a surface floating in
         // front rather than options text scattered over the world.
@@ -504,7 +511,7 @@ public class BuildOptionsScreen extends Screen {
             context.fill(label.x(), label.y() + 1, label.x() + 2, label.y() + 7, ACCENT_LINE);
             context.drawTextWithShadow(this.textRenderer, Text.literal(label.text()),
                     label.x() + 6, label.y(), label.color());
-            context.fill(label.x() + 6, label.y() + 9, panelLeft + PANEL_W, label.y() + 10, DIVIDER);
+            context.fill(label.x() + 6, label.y() + 9, panelLeft + panelW, label.y() + 10, DIVIDER);
         }
         for (Placed p : placedOptions) {
             if (p.row().kind() == RowKind.OPTION) renderOption(context, p, mouseX, mouseY);
@@ -541,7 +548,7 @@ public class BuildOptionsScreen extends Screen {
                     z[0] + (z[1] - tw) / 2, panelTop + (TAB_H - 8) / 2, color);
             if (active) context.fill(z[0] + 2, panelTop + TAB_H, z[0] + z[1] - 2, panelTop + TAB_H + 2, ACCENT);
         }
-        context.fill(panelLeft, panelTop + TAB_H + 2, panelLeft + PANEL_W, panelTop + TAB_H + 3, DIVIDER);
+        context.fill(panelLeft, panelTop + TAB_H + 2, panelLeft + panelW, panelTop + TAB_H + 3, DIVIDER);
     }
 
     private void renderOption(DrawContext context, Placed p, int mouseX, int mouseY) {
@@ -650,10 +657,10 @@ public class BuildOptionsScreen extends Screen {
             context.drawTextWithShadow(this.textRenderer,
                     Text.literal(entry.getKey().getName().getString()), x, y, TEXT_PRIMARY);
             context.drawTextWithShadow(this.textRenderer,
-                    Text.literal("need " + entry.getValue()), x + PANEL_W * 55 / 100, y, TEXT_SECONDARY);
+                    Text.literal("need " + entry.getValue()), x + panelW * 55 / 100, y, TEXT_SECONDARY);
             context.drawTextWithShadow(this.textRenderer,
                     Text.literal(missing > 0 ? "short " + missing : "ok"),
-                    x + PANEL_W * 79 / 100, y, missing > 0 ? BAD : GOOD);
+                    x + panelW * 79 / 100, y, missing > 0 ? BAD : GOOD);
             y += 12;
             shown++;
         }
@@ -667,15 +674,15 @@ public class BuildOptionsScreen extends Screen {
         int percent = total == 0 ? 0 : done * 100 / total;
 
         int barH = 10;
-        context.fill(x, y, x + PANEL_W, y + barH, BG_FIELD);
-        int fillW = (int) (PANEL_W * (percent / 100.0));
+        context.fill(x, y, x + panelW, y + barH, BG_FIELD);
+        int fillW = (int) (panelW * (percent / 100.0));
         if (fillW > 0) context.fill(x, y, x + fillW, y + barH, GOOD);
-        cutCorners(context, x, y, x + PANEL_W, y + barH, BG_PANEL);
-        drawOutline(context, x, y, PANEL_W, barH, PANEL_BORDER);
+        cutCorners(context, x, y, x + panelW, y + barH, BG_PANEL);
+        drawOutline(context, x, y, panelW, barH, PANEL_BORDER);
         String pctText = percent + "%";
         int ptw = this.textRenderer.getWidth(pctText);
         context.drawTextWithShadow(this.textRenderer, Text.literal(pctText),
-                x + PANEL_W - ptw - 3, y + 1, TEXT_PRIMARY);
+                x + panelW - ptw - 3, y + 1, TEXT_PRIMARY);
         y += barH + 6;
 
         line(context, x, y, "Progress", total == 0 ? "no plan yet" : done + " / " + total + "  (" + percent + "%)", GOOD); y += 12;

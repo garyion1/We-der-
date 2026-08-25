@@ -235,7 +235,10 @@ public class AuctionHouseBuyer {
             selectOnCurrentPage(client);
             return;
         }
-        readPage(s.getScreenHandler());  // refresh nextPageSlot for this page
+        // Only nextPageSlot is needed here -- readPage() would append into the
+        // survey pass's own `surveyed` list, which is stale as soon as we start
+        // walking back and is never read again, so use a throwaway list instead.
+        readPageInto(s.getScreenHandler(), new ArrayList<>(), currentPage);
         if (nextPageSlot < 0) {
             // Fewer pages than before -- listings shifted. Buy the best here.
             selectOnCurrentPage(client);

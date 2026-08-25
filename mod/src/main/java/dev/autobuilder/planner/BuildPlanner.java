@@ -210,8 +210,19 @@ public class BuildPlanner {
         if (stranded.isEmpty()) return false;
 
         if (config.strategy == BuilderConfig.BuildStrategy.SCAFFOLD_AWARE) {
-            BlockPos target = stranded.get(0);
-            if (buildScaffoldColumn(target, placed, order, remaining, frontier) > 0) return true;
+            // Try every stranded position at this layer, not just the first --
+            // one column having no ground beneath it (over water, a hole, the
+            // map edge) says nothing about whether the others can be scaffolded.
+            // Giving up on the whole layer after a single failure meant a build
+            // with several floating sections at the same height would abandon
+            // every one of them the moment any single one lacked ground below.
+            boolean scaffoldedAny = false;
+            for (BlockPos target : stranded) {
+                if (buildScaffoldColumn(target, placed, order, remaining, frontier) > 0) {
+                    scaffoldedAny = true;
+                }
+            }
+            if (scaffoldedAny) return true;
         }
         // Unsupported and unscaffoldable: emit them anyway so the executor can
         // report them as needing manual help, rather than silently dropping them.
