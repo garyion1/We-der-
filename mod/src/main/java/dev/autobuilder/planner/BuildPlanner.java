@@ -2,7 +2,6 @@ package dev.autobuilder.planner;
 
 import dev.autobuilder.config.BuilderConfig;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.item.Item;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -33,15 +32,14 @@ public class BuildPlanner {
     };
 
     private final BuilderConfig.BuildStrategy strategy;
+    private final BuilderConfig.LayerDirection layerDirection;
     private final BlockState scaffoldState;
+    private final Random random = new Random();
 
-    public BuildPlanner(BuilderConfig.BuildStrategy strategy) {
-        this(strategy, Blocks.DIRT.getDefaultState());
-    }
-
-    public BuildPlanner(BuilderConfig.BuildStrategy strategy, BlockState scaffoldState) {
-        this.strategy = strategy;
-        this.scaffoldState = scaffoldState;
+    public BuildPlanner(BuilderConfig config) {
+        this.strategy = config.strategy;
+        this.layerDirection = config.layerDirection;
+        this.scaffoldState = config.scaffoldBlock.state();
     }
 
     /**
@@ -60,6 +58,7 @@ public class BuildPlanner {
         List<BlockPlacement> order = new ArrayList<>(targetBlocks.size());
         BlockPos cursor = origin;
         int scaffoldCount = 0;
+        Item currentMaterial = null; // BY_MATERIAL: the material being worked through
 
         BoundingBox bbox = BoundingBox.of(targetBlocks.keySet());
 
@@ -103,19 +102,48 @@ public class BuildPlanner {
             final BlockPos from = cursor;
             Comparator<BlockPos> byDistance = Comparator.comparingDouble(
                     p -> p.getSquaredDistance(from.getX(), from.getY(), from.getZ()));
+            // TOP_DOWN flips the layer ordering. Support is still required either
+            // way, so top-down picks the highest *supported* block rather than
+            // literally starting at the roof of an unsupported schematic.
+            Comparator<BlockPos> byLayer = layerDirection == BuilderConfig.LayerDirection.TOP_DOWN
+                    ? Comparator.comparingInt(BlockPos::getY).reversed()
+                    : Comparator.comparingInt(BlockPos::getY);
 
+            // BY_MATERIAL sticks with one block type until no supported candidate
+            // uses it, which keeps the hotbar stable and mirrors how a person
+            // builds from a stack of one thing.
+            if (strategy == BuilderConfig.BuildStrategy.BY_MATERIAL) {
+                final Item material = currentMaterial;
+                boolean stillAvailable = material != null && candidates.stream()
+                        .anyMatch(p -> itemOf(remaining.get(p)) == material);
+                if (!stillAvailable) {
+                    currentMaterial = candidates.stream()
+                            .map(p -> itemOf(remaining.get(p)))
+                            .filter(Objects::nonNull)
+                            .findFirst().orElse(null);
+                }
+            }
+
+            final Item material = currentMaterial;
             BlockPos next = switch (strategy) {
                 case NEAREST_FIRST -> candidates.stream()
-                        .min(Comparator.<BlockPos>comparingInt(BlockPos::getY).thenComparing(byDistance))
+                        .min(byDistance)
                         .orElseThrow();
                 case OUTSIDE_IN -> candidates.stream()
                         .min(Comparator.<BlockPos>comparingInt(p -> bbox.isShell(p) ? 0 : 1)
-                                .thenComparingInt(BlockPos::getY)
+                                .thenComparing(byLayer)
                                 .thenComparing(byDistance))
                         .orElseThrow();
                 case BOTTOM_UP_LAYERS, SCAFFOLD_AWARE -> candidates.stream()
-                        .min(Comparator.<BlockPos>comparingInt(BlockPos::getY).thenComparing(byDistance))
+                        .min(byLayer.thenComparing(byDistance))
                         .orElseThrow();
+                case BY_MATERIAL -> candidates.stream()
+                        .min(Comparator.<BlockPos>comparingInt(
+                                        p -> itemOf(remaining.get(p)) == material ? 0 : 1)
+                                .thenComparing(byLayer)
+                                .thenComparing(byDistance))
+                        .orElseThrow();
+                case RANDOM -> candidates.get(random.nextInt(candidates.size()));
             };
 
             Direction support = findSupport(next, placed);
@@ -159,6 +187,11 @@ public class BuildPlanner {
             count++;
         }
         return count;
+    }
+
+    /** The item a player would hold to place this state, or null if it has none (air, fluids). */
+    private static Item itemOf(BlockState state) {
+        return state == null ? null : state.getBlock().asItem();
     }
 
     public static Map<Item, Integer> tallyMaterials(List<BlockPlacement> order) {

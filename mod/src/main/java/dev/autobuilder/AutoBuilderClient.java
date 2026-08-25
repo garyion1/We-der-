@@ -28,7 +28,7 @@ public class AutoBuilderClient implements ClientModInitializer {
         openMenuKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.autobuilder.open_menu",
                 InputUtil.Type.KEYSYM,
-                GLFW.GLFW_KEY_APOSTROPHE,
+                GLFW.GLFW_KEY_LEFT_BRACKET,
                 KeyBinding.Category.MISC
         ));
 

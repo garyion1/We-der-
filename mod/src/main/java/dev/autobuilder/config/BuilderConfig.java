@@ -1,22 +1,70 @@
 package dev.autobuilder.config;
 
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
+
 /**
- * All user-tunable behavior lives here so the GUI (opened with the ' key)
- * has one object to read/write. Not persisted to disk yet -- wire up
- * malilib's JSON config helpers (or your own Gson file) in loadFromDisk()/
- * saveToDisk() once you're happy with the defaults.
+ * All user-tunable behavior, grouped by the GUI tab it appears on (open with [).
+ * Not persisted to disk yet -- settings reset each launch.
  */
 public class BuilderConfig {
 
+    // ---------------------------------------------------------------- build order
+
     public enum BuildStrategy {
-        BOTTOM_UP_LAYERS("Bottom-up, layer by layer"),
-        NEAREST_FIRST("Nearest block first (least walking)"),
-        OUTSIDE_IN("Outer walls first, then interior"),
-        SCAFFOLD_AWARE("Bottom-up + auto-scaffold under floating sections");
+        BOTTOM_UP_LAYERS("Layer by layer"),
+        NEAREST_FIRST("Nearest block first"),
+        OUTSIDE_IN("Shell first, then interior"),
+        SCAFFOLD_AWARE("Layers + auto-scaffold"),
+        BY_MATERIAL("One material at a time"),
+        RANDOM("Random order");
 
         public final String label;
         BuildStrategy(String label) { this.label = label; }
     }
+
+    public enum LayerDirection {
+        BOTTOM_UP("Bottom to top"),
+        TOP_DOWN("Top to bottom");
+
+        public final String label;
+        LayerDirection(String label) { this.label = label; }
+    }
+
+    public enum ScaffoldBlock {
+        DIRT("Dirt", Blocks.DIRT),
+        COBBLESTONE("Cobblestone", Blocks.COBBLESTONE),
+        NETHERRACK("Netherrack", Blocks.NETHERRACK),
+        STONE("Stone", Blocks.STONE);
+
+        public final String label;
+        private final net.minecraft.block.Block block;
+        ScaffoldBlock(String label, net.minecraft.block.Block block) {
+            this.label = label;
+            this.block = block;
+        }
+        public BlockState state() { return block.getDefaultState(); }
+    }
+
+    public BuildStrategy strategy = BuildStrategy.BOTTOM_UP_LAYERS;
+    public LayerDirection layerDirection = LayerDirection.BOTTOM_UP;
+    public ScaffoldBlock scaffoldBlock = ScaffoldBlock.DIRT;
+    /** Break blocks that already occupy a target position but are the wrong type. */
+    public boolean breakWrongBlocks = false;
+
+    // ---------------------------------------------------------------- movement
+
+    /** Use ender pearls to bridge vertical gaps the pathfinder can't walk/jump. */
+    public boolean usePearlClimbing = true;
+    /** Won't throw pearls for climbing if it would drop the stack below this. */
+    public int pearlReserve = 4;
+    /** How close the builder gets to a block before placing it. */
+    public double maxReach = 4.0;
+    public boolean allowSprint = false;
+    /** A* search budget. Higher copes with mazier terrain, at some CPU cost. */
+    public int maxPathNodes = 4000;
+
+    // ---------------------------------------------------------------- timing
 
     public enum Pace {
         CAREFUL(1.6, 0.35, 900, 1600),
@@ -38,35 +86,55 @@ public class BuilderConfig {
         }
     }
 
-    public BuildStrategy strategy = BuildStrategy.BOTTOM_UP_LAYERS;
     public Pace pace = Pace.NORMAL;
+    /** Pause periodically, the way a person building for an hour actually would. */
+    public boolean takeBreaks = true;
+    public int breakEveryBlocks = 128;
+    public int breakSeconds = 15;
+    /** Glance around while paused rather than standing perfectly still. */
+    public boolean lookAroundOnBreak = true;
 
-    /** Use ender pearls to bridge vertical gaps the pathfinder can't walk/jump. */
-    public boolean usePearlClimbing = true;
-    /** Minimum pearls to keep in reserve; won't throw the last N for climbing. */
-    public int pearlReserve = 4;
+    // ---------------------------------------------------------------- materials
+
+    public enum OutOfMaterialsPolicy {
+        SKIP_BLOCK("Skip the block"),
+        PAUSE_BUILD("Pause the build");
+
+        public final String label;
+        OutOfMaterialsPolicy(String label) { this.label = label; }
+    }
 
     /**
-     * When true, and inventory is short on a needed block, the executor will
-     * open the server's auction house and buy the cheapest available stack.
-     * OFF by default: this automates a purchase against a live server economy,
-     * which most servers' rules treat the same as any other bot/macro use --
-     * read your server's rules before turning this on, and only use it
-     * somewhere you're allowed to automate play (singleplayer, a server you
-     * administer, or one whose rules explicitly permit it).
+     * When inventory runs short, buy the missing block from the server's auction
+     * house. OFF by default: this spends real in-game currency automatically, and
+     * most servers' rules treat automated buying the same as any other bot use --
+     * check yours before enabling.
      */
     public boolean autoBuyMaterials = false;
-    /** Command template sent to shop; %s is replaced with the item search term. */
+    /** Command sent to open the auction search; %s becomes the item name. */
     public String auctionCommandTemplate = "/ah %s";
-    /** Max price-per-item willing to pay before skipping a purchase and just reporting the shortfall. */
-    public double maxUnitPrice = Double.MAX_VALUE;
     /**
-     * Regex applied to each auction slot's display name + lore lines, first
-     * capture group = the numeric price. Tune this to match your server's
-     * actual GUI wording -- e.g. "\\$([0-9,.]+)" or "Price: ([0-9,.]+) coins".
+     * Regex over each auction slot's name + lore; group 1 must be the price.
+     * Tune to your server's wording, e.g. "\\$([0-9,.]+)" or "Price: ([0-9,.]+)".
      */
     public String auctionPriceRegex = "\\$\\s*([0-9][0-9,.]*)";
-    /** Some servers need a second click (a confirm dialog / double-click-to-buy) after the first. */
+    /** Skip listings dearer than this per item. */
+    public double maxUnitPrice = 1_000_000.0;
+    /** Some auction GUIs need a second click to confirm a purchase. */
     public boolean auctionRequiresConfirmClick = false;
     public int auctionConfirmDelayTicks = 4;
+    /** Buy this much above the shortfall, so near-misses don't restart shopping. */
+    public int buyExtraPercent = 10;
+    public OutOfMaterialsPolicy outOfMaterials = OutOfMaterialsPolicy.SKIP_BLOCK;
+
+    // ---------------------------------------------------------------- safety
+
+    public boolean stopOnLowHealth = true;
+    /** Half-hearts; 10 = five hearts. */
+    public int lowHealthThreshold = 10;
+    /** Stop if another player comes within stopOnPlayerRadius blocks. */
+    public boolean stopOnPlayerNearby = false;
+    public int stopOnPlayerRadius = 32;
+    /** 0 = no limit. Otherwise stop after this many minutes. */
+    public int maxBuildMinutes = 0;
 }

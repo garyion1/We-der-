@@ -11,6 +11,7 @@ import dev.autobuilder.schematic.SchematicSource;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.screen.slot.SlotActionType;
@@ -25,18 +26,17 @@ import java.util.*;
 
 /**
  * The tick-driven state machine that actually plays the game: walk, look,
- * place, restock, repeat. This is the file most likely to need hand-fixing
- * once you build against real 1.21.11 mappings -- method names shift
- * slightly release to release and this was written without a compiler in
- * the loop (no network access to Mojang/Fabric Maven from this environment).
- * The algorithmic pieces (planning order, A*, human-motion easing, the
- * .litematic parser) don't depend on exact Minecraft API surface and are
- * the parts to trust most; this file is glue on top of them.
+ * clear what's in the way, place, restock, rest, repeat.
+ *
+ * Per placement the cycle is NAVIGATE (pearl-climbing where there's no walkable
+ * route) -> ALIGN -> ENSURE_ITEM (shopping the auction house if enabled) ->
+ * BREAK if something wrong occupies the spot -> PLACE -> DWELL, with REST
+ * folded in every breakEveryBlocks placements.
  */
 public class BuildExecutor {
 
     public enum State { IDLE, PLANNING, RUNNING, PAUSED, DONE, FAILED }
-    private enum Step { NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, PLACE, DWELL, SKIP }
+    private enum Step { NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, BREAK, PLACE, DWELL, REST, SKIP }
 
     private final BuilderConfig config;
     private final SchematicSource schematic;
@@ -59,6 +59,11 @@ public class BuildExecutor {
     private int waitTicks;
     private BlockPos pearlLandingTarget;
 
+    /** Materials the auction house couldn't supply; don't keep retrying them. */
+    private final Set<Item> unbuyable = new HashSet<>();
+    private int blocksSinceBreak;
+    private long buildStartedAtMs;
+
     public BuildExecutor(BuilderConfig config, SchematicSource schematic) {
         this.config = config;
         this.schematic = schematic;
@@ -72,6 +77,9 @@ public class BuildExecutor {
             return;
         }
         this.motion = new HumanMotion(config.pace); // pick up any pace change from the GUI
+        this.unbuyable.clear();
+        this.blocksSinceBreak = 0;
+        this.buildStartedAtMs = System.currentTimeMillis();
         state = State.PLANNING;
     }
 
@@ -124,7 +132,7 @@ public class BuildExecutor {
             }
         }
 
-        BuildPlanner planner = new BuildPlanner(config.strategy);
+        BuildPlanner planner = new BuildPlanner(config);
         plan = planner.plan(toPlace, worldSolid, player.getBlockPos());
         placementIndex = 0;
         placedCount = 0;
@@ -142,6 +150,15 @@ public class BuildExecutor {
     }
 
     private void doRun(MinecraftClient client, ClientPlayerEntity player) {
+        String abort = checkSafety(client, player);
+        if (abort != null) {
+            resetInputs();
+            state = State.PAUSED;
+            statusMessage = abort;
+            player.sendMessage(Text.literal("[Auto Builder] paused: " + abort), false);
+            return;
+        }
+
         if (placementIndex >= plan.order().size()) {
             resetInputs();
             state = State.DONE;
@@ -158,9 +175,44 @@ public class BuildExecutor {
             case PEARL_WAIT -> handlePearlWait(client, player);
             case ALIGN -> handleAlign(client, player, bp);
             case ENSURE_ITEM -> handleEnsureItem(client, player, bp);
+            case BREAK -> handleBreak(client, bp);
             case PLACE -> handlePlace(client, player, bp);
             case DWELL -> handleDwell();
+            case REST -> handleRest(player);
             case SKIP -> advance(false);
+        }
+    }
+
+    /** Returns a reason to stop, or null to carry on. */
+    private String checkSafety(MinecraftClient client, ClientPlayerEntity player) {
+        if (config.stopOnLowHealth && player.getHealth() <= config.lowHealthThreshold) {
+            return "health below " + (config.lowHealthThreshold / 2.0) + " hearts";
+        }
+        if (config.maxBuildMinutes > 0
+                && System.currentTimeMillis() - buildStartedAtMs > config.maxBuildMinutes * 60_000L) {
+            return "hit the " + config.maxBuildMinutes + " minute time limit";
+        }
+        if (config.stopOnPlayerNearby && client.world != null) {
+            double radiusSq = (double) config.stopOnPlayerRadius * config.stopOnPlayerRadius;
+            for (PlayerEntity other : client.world.getPlayers()) {
+                if (other != player && other.squaredDistanceTo(player) <= radiusSq) {
+                    return other.getName().getString() + " came within "
+                            + config.stopOnPlayerRadius + " blocks";
+                }
+            }
+        }
+        return null;
+    }
+
+    /** A pause between stretches of work, the way a person building for an hour takes one. */
+    private void handleRest(ClientPlayerEntity player) {
+        if (config.lookAroundOnBreak && waitTicks % 20 == 0) {
+            look = motion.stepLook(look, player.getYaw() + (float) (Math.random() * 120 - 60), 0f);
+            player.setYaw(look.yaw());
+            player.setPitch(look.pitch());
+        }
+        if (waitTicks-- <= 0) {
+            step = Step.NAVIGATE;
         }
     }
 
@@ -171,7 +223,7 @@ public class BuildExecutor {
             BlockPos standGoal = computeStandPosition(bp);
             PathFinder finder = new PathFinder(
                     pos -> isStandable(client, pos), config.usePearlClimbing, 32);
-            path = finder.findPath(player.getBlockPos(), standGoal, 4000);
+            path = finder.findPath(player.getBlockPos(), standGoal, config.maxPathNodes);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
                 skipped.add(bp);
@@ -208,8 +260,11 @@ public class BuildExecutor {
 
     private BlockPos computeStandPosition(BlockPlacement bp) {
         Direction away = bp.clickFace() != null ? bp.clickFace() : Direction.UP;
+        // Stand back by (reach - 1) so the target face is comfortably inside reach
+        // rather than right at its limit, where small drift makes placement fail.
+        int standoff = Math.max(1, (int) Math.floor(config.maxReach) - 1);
         return bp.supportNeighbor() != null
-                ? bp.supportNeighbor().offset(away, 2)
+                ? bp.supportNeighbor().offset(away, standoff)
                 : bp.pos().down();
     }
 
@@ -322,22 +377,75 @@ public class BuildExecutor {
     private void handleEnsureItem(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         Item needed = bp.state().getBlock().asItem();
         int hotbarSlot = findHotbarOrInventorySlot(player, needed);
-        if (hotbarSlot < 0) {
-            statusMessage = "missing " + needed.getName().getString() + " for this block";
-            player.sendMessage(Text.translatable("autobuilder.chat.materials_needed", 1, needed.getName()), false);
-            if (config.autoBuyMaterials && !auctionBuyer.active()) {
-                auctionBuyer.startShopping(client, needed.getName().getString());
-            }
-            if (auctionBuyer.active()) {
-                auctionBuyer.tick(client);
-                return; // keep waiting on the shop each tick until it resolves
-            }
-            skipped.add(bp);
-            advance(false);
+        if (hotbarSlot >= 0) {
+            selectHotbarSlot(player, hotbarSlot);
+            step = config.breakWrongBlocks && !client.world.getBlockState(bp.pos()).isAir()
+                    ? Step.BREAK
+                    : Step.PLACE;
             return;
         }
-        selectHotbarSlot(player, hotbarSlot);
-        step = Step.PLACE;
+
+        // Out of this material.
+        if (config.autoBuyMaterials && needed != null && !unbuyable.contains(needed)) {
+            if (auctionBuyer.active()) {
+                auctionBuyer.tick(client);
+                return;
+            }
+            switch (auctionBuyer.getPhase()) {
+                case DONE -> {
+                    auctionBuyer.reset();
+                    return; // re-check the inventory next tick
+                }
+                case FAILED -> {
+                    unbuyable.add(needed);
+                    statusMessage = "couldn't buy " + needed.getName().getString()
+                            + ": " + auctionBuyer.getLastError();
+                    player.sendMessage(Text.literal("[Auto Builder] " + statusMessage), false);
+                    auctionBuyer.reset();
+                    return;
+                }
+                default -> {
+                    // Buy enough for the rest of the build, not just this one block --
+                    // one shopping trip instead of one per placement.
+                    int stillNeeded = remainingNeedFor(needed);
+                    int target = (int) Math.ceil(stillNeeded * (1 + config.buyExtraPercent / 100.0));
+                    statusMessage = "buying " + target + "x " + needed.getName().getString();
+                    auctionBuyer.startShopping(client, needed, target);
+                    return;
+                }
+            }
+        }
+
+        if (config.outOfMaterials == BuilderConfig.OutOfMaterialsPolicy.PAUSE_BUILD) {
+            resetInputs();
+            state = State.PAUSED;
+            statusMessage = "out of " + (needed == null ? "materials" : needed.getName().getString());
+            player.sendMessage(Text.literal("[Auto Builder] paused: " + statusMessage), false);
+            return;
+        }
+        skipped.add(bp);
+        advance(false);
+    }
+
+    /** How many more of this item the rest of the plan calls for. */
+    private int remainingNeedFor(Item item) {
+        int count = 0;
+        for (int i = placementIndex; i < plan.order().size(); i++) {
+            BlockPlacement placement = plan.order().get(i);
+            if (placement.state().getBlock().asItem() == item) count++;
+        }
+        return Math.max(1, count);
+    }
+
+    /** Clear a block that's in the target position but isn't what the schematic wants. */
+    private void handleBreak(MinecraftClient client, BlockPlacement bp) {
+        if (client.world.getBlockState(bp.pos()).isAir()) {
+            step = Step.PLACE;
+            return;
+        }
+        Direction face = bp.clickFace() != null ? bp.clickFace() : Direction.UP;
+        client.interactionManager.updateBlockBreakingProgress(bp.pos(), face);
+        client.player.swingHand(Hand.MAIN_HAND);
     }
 
     private void handlePlace(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
@@ -360,6 +468,15 @@ public class BuildExecutor {
         path = List.of();
         pathIndex = 0;
         step = Step.NAVIGATE;
+
+        if (placedOk && config.takeBreaks && ++blocksSinceBreak >= config.breakEveryBlocks) {
+            blocksSinceBreak = 0;
+            waitTicks = config.breakSeconds * 20;
+            statusMessage = "taking a " + config.breakSeconds + "s break";
+            resetInputs();
+            step = Step.REST;
+            return;
+        }
         if (placedOk && motion.shouldHesitate()) {
             waitTicks = motion.reactionDelayTicks();
             step = Step.DWELL;
@@ -376,6 +493,7 @@ public class BuildExecutor {
         player.setYaw(look.yaw());
         player.setPitch(look.pitch());
         client.options.forwardKey.setPressed(true);
+        client.options.sprintKey.setPressed(config.allowSprint);
     }
 
     private void resetInputs() {
@@ -385,6 +503,7 @@ public class BuildExecutor {
         client.options.leftKey.setPressed(false);
         client.options.rightKey.setPressed(false);
         client.options.jumpKey.setPressed(false);
+        client.options.sprintKey.setPressed(false);
     }
 
     private int countItem(ClientPlayerEntity player, Item item) {
