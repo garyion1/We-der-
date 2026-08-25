@@ -36,11 +36,12 @@ public class BuildOptionsScreen extends Screen {
 
     private static final String[] TABS = {"Build", "Move", "Timing", "Buying", "Safety", "Items", "Status"};
 
-    private static final int PANEL_W = 312;
-    private static final int ROW_H = 22;
-    private static final int TAB_H = 20;
-    private static final int MIN_ROW_H = 13;
-    private static final int MIN_WIDGET_H = 12;
+    private static final int PANEL_W = 400;
+    private static final int ROW_H = 26;
+    private static final int TAB_H = 24;
+    private static final int MIN_ROW_H = 15;
+    private static final int MIN_WIDGET_H = 14;
+    private static final int BUTTON_H = 24;
 
     // Flat dark palette -- no vanilla stone-gray/gold, just a small set of
     // neutrals plus one accent color and three semantic status colors.
@@ -73,6 +74,14 @@ public class BuildOptionsScreen extends Screen {
         context.fill(x1, y2 - 1, x1 + 1, y2, eraseColor);
         context.fill(x2 - 1, y2 - 1, x2, y2, eraseColor);
     }
+
+    // Footer geometry, stacked bottom-up from the panel edge: the Start/Pause/
+    // Stop/Close row, the schematic status line above it, and (only when
+    // awaiting a purchase) the approve/decline row above that. Computed once
+    // here so init()'s click zones and render()'s drawing never drift apart.
+    private int controlY() { return this.height - BUTTON_H - 8; }
+    private int statusTextY() { return controlY() - 12; }
+    private int approveY() { return statusTextY() - 6 - BUTTON_H; }
 
     private final BuilderConfig config;
     private final LitematicFileSchematicSource schematicSource;
@@ -153,16 +162,20 @@ public class BuildOptionsScreen extends Screen {
         layoutRows(left, top + TAB_H + 10);
 
         if (tab == 6 && executor.isAwaitingPurchaseConfirmation()) {
-            int approveY = this.height - 54;
             int halfW = PANEL_W / 2 - 3;
-            clickZones.add(new ClickZone(left, approveY, halfW, 20,
+            clickZones.add(new ClickZone(left, approveY(), halfW, BUTTON_H,
                     "Approve purchase", ButtonStyle.PRIMARY, executor::confirmPurchase));
-            clickZones.add(new ClickZone(left + PANEL_W / 2 + 3, approveY, halfW, 20,
+            clickZones.add(new ClickZone(left + PANEL_W / 2 + 3, approveY(), halfW, BUTTON_H,
                     "Decline", ButtonStyle.DANGER, executor::declinePurchase));
         }
 
-        int controlY = this.height - 28;
-        clickZones.add(new ClickZone(left, controlY, 76, 20, "Start", ButtonStyle.PRIMARY, () -> {
+        // Four even buttons spanning the panel width, with a 3px gutter between
+        // each -- computed from PANEL_W rather than hardcoded so a wider panel
+        // gets wider, easier-to-hit buttons instead of a fixed narrow strip.
+        int controlY = controlY();
+        int gutter = 3;
+        int btnW = (PANEL_W - gutter * 3) / 4;
+        clickZones.add(new ClickZone(left, controlY, btnW, BUTTON_H, "Start", ButtonStyle.PRIMARY, () -> {
             applyPending();
             // Only close if it actually started -- closing unconditionally made a
             // schematic Litematica sync hadn't found yet look like Start did
@@ -174,9 +187,12 @@ public class BuildOptionsScreen extends Screen {
                 AutoBuilderClient.LITEMATICA_SYNC.checkNow();
             }
         }));
-        clickZones.add(new ClickZone(left + 78, controlY, 76, 20, "Pause", ButtonStyle.GHOST, executor::pause));
-        clickZones.add(new ClickZone(left + 156, controlY, 76, 20, "Stop", ButtonStyle.GHOST, executor::stop));
-        clickZones.add(new ClickZone(left + 234, controlY, 76, 20, "Close", ButtonStyle.PLAIN, this::close));
+        clickZones.add(new ClickZone(left + (btnW + gutter), controlY, btnW, BUTTON_H,
+                "Pause", ButtonStyle.GHOST, executor::pause));
+        clickZones.add(new ClickZone(left + (btnW + gutter) * 2, controlY, btnW, BUTTON_H,
+                "Stop", ButtonStyle.GHOST, executor::stop));
+        clickZones.add(new ClickZone(left + (btnW + gutter) * 3, controlY, btnW, BUTTON_H,
+                "Close", ButtonStyle.PLAIN, this::close));
     }
 
     /**
@@ -187,7 +203,7 @@ public class BuildOptionsScreen extends Screen {
     private void layoutRows(int x, int top) {
         schematicStatusY = -1;
         placedOptions.clear();
-        int bottom = this.height - 46;
+        int bottom = statusTextY() - 6;
         int available = Math.max(40, bottom - top);
 
         int headers = 0, others = 0;
@@ -505,7 +521,7 @@ public class BuildOptionsScreen extends Screen {
         boolean loaded = schematicSource.isLoaded();
         context.drawCenteredTextWithShadow(this.textRenderer,
                 Text.literal(loaded ? schematicSource.describe() : "No schematic loaded"),
-                this.width / 2, this.height - 42, loaded ? TEXT_SECONDARY : BAD);
+                this.width / 2, statusTextY(), loaded ? TEXT_SECONDARY : BAD);
     }
 
     private void renderTabs(DrawContext context, int mouseX, int mouseY) {
@@ -634,10 +650,10 @@ public class BuildOptionsScreen extends Screen {
             context.drawTextWithShadow(this.textRenderer,
                     Text.literal(entry.getKey().getName().getString()), x, y, TEXT_PRIMARY);
             context.drawTextWithShadow(this.textRenderer,
-                    Text.literal("need " + entry.getValue()), x + 172, y, TEXT_SECONDARY);
+                    Text.literal("need " + entry.getValue()), x + PANEL_W * 55 / 100, y, TEXT_SECONDARY);
             context.drawTextWithShadow(this.textRenderer,
                     Text.literal(missing > 0 ? "short " + missing : "ok"),
-                    x + 248, y, missing > 0 ? BAD : GOOD);
+                    x + PANEL_W * 79 / 100, y, missing > 0 ? BAD : GOOD);
             y += 12;
             shown++;
         }
