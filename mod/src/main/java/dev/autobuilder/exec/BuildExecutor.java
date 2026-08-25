@@ -11,6 +11,7 @@ import dev.autobuilder.schematic.SchematicSource;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
@@ -39,7 +40,7 @@ public class BuildExecutor {
 
     public enum State { IDLE, PLANNING, RUNNING, PAUSED, RETURNING_HOME, DONE, FAILED }
     private enum Step {
-        NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, BREAK, PLACE, DWELL, RETRY_WAIT, REST, SKIP
+        NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, FETCH_ITEM, BREAK, PLACE, DWELL, RETRY_WAIT, REST, SKIP
     }
 
     private final BuilderConfig config;
@@ -62,6 +63,9 @@ public class BuildExecutor {
 
     private int waitTicks;
     private BlockPos pearlLandingTarget;
+    /** The creative-mode item fetch in progress, and which hotbar slot it's going into. */
+    private Item fetchItem;
+    private int fetchSlot;
 
     /** Materials the auction house couldn't supply; don't keep retrying them. */
     private final Set<Item> unbuyable = new HashSet<>();
@@ -357,6 +361,7 @@ public class BuildExecutor {
             case PEARL_WAIT -> handlePearlWait(client, player);
             case ALIGN -> handleAlign(client, player, bp);
             case ENSURE_ITEM -> handleEnsureItem(client, player, bp);
+            case FETCH_ITEM -> handleFetchItem(client, player);
             case BREAK -> handleBreak(client, bp);
             case PLACE -> handlePlace(client, player, bp);
             case DWELL -> handleDwell(player);
@@ -454,6 +459,21 @@ public class BuildExecutor {
     // -- NAVIGATE ------------------------------------------------------
 
     private void handleNavigate(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
+        if (bp.supportNeighbor() == null && !bp.isRemoval()) {
+            // A stranded placement (nothing solid nearby, scaffold couldn't
+            // reach it either) used to fall into computeStandPosition's
+            // removal branch anyway -- stand below and look up, as if there
+            // were something here to break -- and only discover there was
+            // nothing to build against after actually walking there. With
+            // several of these scattered around a floating section, that
+            // reads as wandering pointlessly from spot to spot. Skip it here,
+            // before a single step is taken.
+            statusMessage = "skipping " + bp.pos().toShortString() + " -- nothing solid nearby to build from";
+            skipped.add(bp);
+            consecutiveFailures++;
+            advance(false);
+            return;
+        }
         if (path.isEmpty() && pathIndex == 0) {
             BlockPos standGoal = computeStandPosition(client, player, bp);
             path = buildPath(client, player, standGoal, true, true);
@@ -808,13 +828,14 @@ public class BuildExecutor {
             return;
         }
 
-        // Creative mode: just put the item in the active hotbar slot directly.
-        // The server accepts creative inventory changes, so no purchase needed.
+        // Creative mode: fetch the item into the active hotbar slot. No purchase
+        // needed, but it opens the inventory and pauses for a beat first rather
+        // than the item just appearing mid-air the instant it's needed.
         if (player.getAbilities().creativeMode || config.serverPreset == BuilderConfig.ServerPreset.CREATIVE) {
-            int slot = player.getInventory().getSelectedSlot();
-            player.getInventory().setStack(slot, new ItemStack(needed, 64));
-            selectHotbarSlot(player, slot);
-            step = Step.PLACE;
+            fetchItem = needed;
+            fetchSlot = player.getInventory().getSelectedSlot();
+            waitTicks = motion.dwellTicks();
+            step = Step.FETCH_ITEM;
             return;
         }
 
@@ -858,6 +879,23 @@ public class BuildExecutor {
         }
         skipped.add(bp);
         advance(false);
+    }
+
+    /**
+     * Opens the inventory and holds for a beat before the creative item
+     * actually lands in the hotbar, rather than it appearing on the exact
+     * tick it was needed with no visible action at all.
+     */
+    private void handleFetchItem(MinecraftClient client, ClientPlayerEntity player) {
+        if (client.currentScreen == null) {
+            client.setScreen(new InventoryScreen(player));
+        }
+        if (waitTicks-- > 0) return;
+        player.getInventory().setStack(fetchSlot, new ItemStack(fetchItem, 64));
+        selectHotbarSlot(player, fetchSlot);
+        if (client.currentScreen instanceof InventoryScreen) client.setScreen(null);
+        fetchItem = null;
+        step = Step.PLACE;
     }
 
     /** Blocks until the next break, spread +/-35% around the configured interval. */
