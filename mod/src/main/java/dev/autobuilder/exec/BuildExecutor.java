@@ -404,7 +404,7 @@ public class BuildExecutor {
         }
         for (int i = 9; i < inv.size(); i++) {
             if (inv.getStack(i).getItem() == item) {
-                int targetHotbar = inv.selectedSlot;
+                int targetHotbar = inv.getSelectedSlot();
                 MinecraftClient client = MinecraftClient.getInstance();
                 client.interactionManager.clickSlot(player.currentScreenHandler.syncId, i, targetHotbar, SlotActionType.SWAP, player);
                 return targetHotbar;
@@ -414,6 +414,6 @@ public class BuildExecutor {
     }
 
     private void selectHotbarSlot(ClientPlayerEntity player, int hotbarIndex) {
-        player.getInventory().selectedSlot = hotbarIndex;
+        player.getInventory().setSelectedSlot(hotbarIndex);
     }
 }

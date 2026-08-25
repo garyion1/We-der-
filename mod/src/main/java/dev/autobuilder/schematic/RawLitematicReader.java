@@ -35,32 +35,48 @@ public class RawLitematicReader {
             root = NbtIo.readCompressed(in, NbtSizeTracker.ofUnlimitedBytes());
         }
 
-        NbtCompound regions = root.getCompound("Regions");
+        NbtCompound regions = root.getCompound("Regions")
+                .orElseThrow(() -> new IOException("Not a .litematic file: no 'Regions' tag"));
         Map<BlockPos, BlockState> world = new HashMap<>();
         for (String regionName : regions.getKeys()) {
-            NbtCompound region = regions.getCompound(regionName);
-            for (Map.Entry<BlockPos, BlockState> e : parseRegion(region).entrySet()) {
+            Optional<NbtCompound> region = regions.getCompound(regionName);
+            if (region.isEmpty()) continue;
+            for (Map.Entry<BlockPos, BlockState> e : parseRegion(region.get()).entrySet()) {
                 world.put(worldOrigin.add(e.getKey()), e.getValue());
             }
         }
         return world;
     }
 
-    /** Returns region-local (not yet offset by the region's own Position) block positions -> states. */
+    /**
+     * Returns region-local (not yet offset by the region's own Position) block positions -> states.
+     *
+     * NBT getters return Optional in current Minecraft versions, so this uses
+     * plain Optional methods (orElse/orElseThrow) rather than the version-specific
+     * getXOr convenience overloads.
+     */
     private Map<BlockPos, BlockState> parseRegion(NbtCompound region) {
-        NbtCompound posTag = region.getCompound("Position");
-        NbtCompound sizeTag = region.getCompound("Size");
-        BlockPos regionOffset = new BlockPos(posTag.getInt("x"), posTag.getInt("y"), posTag.getInt("z"));
-        int sizeX = sizeTag.getInt("x"), sizeY = sizeTag.getInt("y"), sizeZ = sizeTag.getInt("z");
+        NbtCompound posTag = region.getCompound("Position").orElse(new NbtCompound());
+        NbtCompound sizeTag = region.getCompound("Size").orElse(new NbtCompound());
+        BlockPos regionOffset = new BlockPos(
+                posTag.getInt("x").orElse(0),
+                posTag.getInt("y").orElse(0),
+                posTag.getInt("z").orElse(0));
+        int sizeX = sizeTag.getInt("x").orElse(0);
+        int sizeY = sizeTag.getInt("y").orElse(0);
+        int sizeZ = sizeTag.getInt("z").orElse(0);
         int absX = Math.abs(sizeX), absY = Math.abs(sizeY), absZ = Math.abs(sizeZ);
 
-        NbtList paletteTag = region.getList("BlockStatePalette", NbtElement.COMPOUND_TYPE);
-        List<BlockState> palette = new ArrayList<>(paletteTag.size());
-        for (int i = 0; i < paletteTag.size(); i++) {
-            palette.add(paletteEntryToState(paletteTag.getCompound(i)));
+        // Iterate elements rather than using an index-based getCompound(int),
+        // whose return type also varies by version.
+        List<BlockState> palette = new ArrayList<>();
+        for (NbtElement element : region.getList("BlockStatePalette").orElse(new NbtList())) {
+            if (element instanceof NbtCompound entry) {
+                palette.add(paletteEntryToState(entry));
+            }
         }
 
-        long[] longArray = region.getLongArray("BlockStates");
+        long[] longArray = region.getLongArray("BlockStates").orElse(new long[0]);
         int volume = absX * absY * absZ;
         int bitsPerEntry = Math.max(2, 32 - Integer.numberOfLeadingZeros(Math.max(1, palette.size() - 1)));
         LitematicaBitArray bits = new LitematicaBitArray(bitsPerEntry, longArray);
@@ -90,17 +106,18 @@ public class RawLitematicReader {
     }
 
     private BlockState paletteEntryToState(NbtCompound entry) {
-        Identifier id = Identifier.tryParse(entry.getString("Name"));
+        Identifier id = Identifier.tryParse(entry.getString("Name").orElse(""));
         Block block = id != null ? Registries.BLOCK.get(id) : Blocks.AIR;
         BlockState state = block.getDefaultState();
 
-        if (entry.contains("Properties")) {
-            NbtCompound props = entry.getCompound("Properties");
+        Optional<NbtCompound> maybeProps = entry.getCompound("Properties");
+        if (maybeProps.isPresent()) {
+            NbtCompound props = maybeProps.get();
             StateManager<Block, BlockState> stateManager = block.getStateManager();
             for (String key : props.getKeys()) {
                 Property<?> property = stateManager.getProperty(key);
                 if (property != null) {
-                    state = applyProperty(state, property, props.getString(key));
+                    state = applyProperty(state, property, props.getString(key).orElse(""));
                 }
             }
         }

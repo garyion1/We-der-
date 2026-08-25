@@ -21,11 +21,15 @@ public class AutoBuilderClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        // KeyBinding takes a KeyBinding.Category (a record) rather than a String
+        // in current versions. Using the built-in MISC category rather than
+        // registering a custom one -- registering the same category id twice
+        // throws, and MISC needs no registration.
         openMenuKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.autobuilder.open_menu",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_APOSTROPHE,
-                "key.categories.autobuilder"
+                KeyBinding.Category.MISC
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {

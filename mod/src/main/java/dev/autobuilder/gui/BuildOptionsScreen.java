@@ -7,12 +7,14 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
-import net.minecraft.client.gui.widget.CyclingButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 
 import java.nio.file.Path;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /** Opened by pressing ' (apostrophe) -- see AutoBuilderClient's keybinding registration. */
 public class BuildOptionsScreen extends Screen {
@@ -55,28 +57,29 @@ public class BuildOptionsScreen extends Screen {
         addDrawableChild(originZField);
         y += rowH;
 
-        addDrawableChild(CyclingButtonWidget.<BuilderConfig.BuildStrategy>builder(s -> Text.literal(s.label))
-                .values(BuilderConfig.BuildStrategy.values())
-                .initially(config.strategy)
-                .build(x, y, 200, 20, Text.translatable("autobuilder.screen.strategy"),
-                        (btn, value) -> config.strategy = value));
+        // Plain ButtonWidgets that cycle on click, rather than CyclingButtonWidget:
+        // its builder generics shift between Minecraft versions, and this needs
+        // nothing beyond ButtonWidget, which is stable.
+        addDrawableChild(cyclingButton(x, y, "autobuilder.screen.strategy",
+                BuilderConfig.BuildStrategy.values(),
+                () -> config.strategy, v -> config.strategy = v, v -> v.label));
         y += rowH;
 
-        addDrawableChild(CyclingButtonWidget.<BuilderConfig.Pace>builder(p -> Text.literal(p.name()))
-                .values(BuilderConfig.Pace.values())
-                .initially(config.pace)
-                .build(x, y, 200, 20, Text.translatable("autobuilder.screen.pace"),
-                        (btn, value) -> config.pace = value));
+        addDrawableChild(cyclingButton(x, y, "autobuilder.screen.pace",
+                BuilderConfig.Pace.values(),
+                () -> config.pace, v -> config.pace = v, Enum::name));
         y += rowH;
 
-        addDrawableChild(CyclingButtonWidget.onOffBuilder(config.usePearlClimbing)
-                .build(x, y, 200, 20, Text.translatable("autobuilder.screen.use_pearls"),
-                        (btn, value) -> config.usePearlClimbing = value));
+        addDrawableChild(cyclingButton(x, y, "autobuilder.screen.use_pearls",
+                new Boolean[]{Boolean.TRUE, Boolean.FALSE},
+                () -> config.usePearlClimbing, v -> config.usePearlClimbing = v,
+                v -> v ? "ON" : "OFF"));
         y += rowH;
 
-        addDrawableChild(CyclingButtonWidget.onOffBuilder(config.autoBuyMaterials)
-                .build(x, y, 200, 20, Text.translatable("autobuilder.screen.auto_buy"),
-                        (btn, value) -> config.autoBuyMaterials = value));
+        addDrawableChild(cyclingButton(x, y, "autobuilder.screen.auto_buy",
+                new Boolean[]{Boolean.TRUE, Boolean.FALSE},
+                () -> config.autoBuyMaterials, v -> config.autoBuyMaterials = v,
+                v -> v ? "ON" : "OFF"));
         y += rowH;
 
         addDrawableChild(ButtonWidget.builder(Text.translatable("autobuilder.screen.start"), b -> {
@@ -91,6 +94,29 @@ public class BuildOptionsScreen extends Screen {
 
         addDrawableChild(ButtonWidget.builder(Text.translatable("autobuilder.screen.stop"), b -> executor.stop())
                 .dimensions(x, y, 200, 20).build());
+    }
+
+    /**
+     * A button showing "Label: value" that advances to the next value each click.
+     * Replaces CyclingButtonWidget, whose builder signature is version-sensitive.
+     */
+    private <T> ButtonWidget cyclingButton(int x, int y, String labelKey, T[] values,
+                                           Supplier<T> getter, Consumer<T> setter,
+                                           Function<T, String> render) {
+        return ButtonWidget.builder(cycleLabel(labelKey, render.apply(getter.get())), btn -> {
+            T current = getter.get();
+            int index = 0;
+            for (int i = 0; i < values.length; i++) {
+                if (values[i].equals(current)) { index = i; break; }
+            }
+            T next = values[(index + 1) % values.length];
+            setter.accept(next);
+            btn.setMessage(cycleLabel(labelKey, render.apply(next)));
+        }).dimensions(x, y, 200, 20).build();
+    }
+
+    private Text cycleLabel(String labelKey, String value) {
+        return Text.translatable(labelKey).copy().append(Text.literal(": " + value));
     }
 
     private TextFieldWidget smallField(int x, int y, String initial) {
