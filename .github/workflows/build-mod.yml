@@ -54,8 +54,8 @@ jobs:
       - name: Probe real API surface with javap
         if: always()
         run: |
-          jar="$(find ~/.gradle/caches/fabric-loom -iname '*.jar' \
-                 | grep -iE 'minecraft.*(named|mapped)' | grep -v sources | head -1)"
+          jar="$(find ~/.gradle/caches/fabric-loom -iname 'minecraft-merged-*.jar' \
+                 | grep -v sources | head -1)"
           echo "Using jar: $jar"
           [ -z "$jar" ] && { echo "no mapped MC jar found"; find ~/.gradle/caches/fabric-loom -iname '*.jar'; exit 0; }
           d=/tmp/mcjar && rm -rf "$d" && mkdir -p "$d" && cd "$d"
