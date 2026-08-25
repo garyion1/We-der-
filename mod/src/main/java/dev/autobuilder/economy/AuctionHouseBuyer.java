@@ -21,53 +21,67 @@ import java.util.regex.Pattern;
 
 /**
  * Drives a server's auction-house GUI: search, read prices out of listing lore,
- * and buy the cheapest ones until the requested quantity is covered.
+ * and buy the cheapest listings until the requested quantity is covered.
  *
- * Finding the actual cheapest means paging: the cheapest listing on page one is
- * not necessarily the cheapest listing. With scanAllPages on, every page is read
- * first and only then is the best one bought.
+ * Finding the genuinely cheapest listing takes two passes, because only the page
+ * currently on screen can be clicked:
+ *   1. SURVEY  -- page through the whole listing recording every price.
+ *   2. RETURN  -- re-run the search, page back to whichever page held the
+ *                 cheapest, re-read it (listings may have moved) and buy there.
+ * Buying "the cheapest seen" while standing on the last page would either pay
+ * the last page's price or, worse, click a slot index that belongs to a
+ * different page and buy something else entirely.
  *
  * Two price limits, deliberately separate:
- *   - autoBuyLimit: bought without asking.
- *   - above it: the trip stops and waits for explicit confirmation, so an
- *     unattended build can't quietly drain an account on a mispriced listing.
- *   - hardMaxPrice: never bought, confirmed or not.
- * A listing whose price can't be parsed is never bought -- unreadable is treated
- * as too expensive, not as free.
+ *   - at or under autoBuyLimit: bought unattended.
+ *   - above it: stops and waits for explicit approval, so an unattended build
+ *     can't quietly drain an account on a mispriced listing.
+ *   - hardMaxPrice: never bought, approved or not.
+ * A listing whose price can't be parsed is never bought -- unreadable counts as
+ * too expensive, not as free.
  *
- * This spends real in-game currency unattended. autoBuyMaterials defaults to off;
- * most servers' rules treat automated buying the same as any other bot use.
+ * This spends real in-game currency unattended. autoBuyMaterials defaults to
+ * off; most servers treat automated buying the same as any other bot use.
  */
 public class AuctionHouseBuyer {
 
     public enum Phase {
-        IDLE, WAITING_FOR_GUI, SCANNING, TURNING_PAGE,
+        IDLE, WAITING_FOR_GUI, SURVEYING, TURNING_PAGE, RETURNING_TO_PAGE,
         AWAITING_CONFIRMATION, CLICKING, CONFIRMING, SETTLING, DONE, FAILED
     }
 
     public record Listing(int slotId, double unitPrice, int quantity, int page) {}
 
     private static final int MAX_PURCHASES = 16;
+    private static final int MAX_TRIPS = 8;
     private static final int SETTLE_TICKS = 10;
     private static final int PAGE_LOAD_TICKS = 12;
+    private static final int GUI_WAIT_TICKS = 100;
 
     private final BuilderConfig config;
     private Pattern pricePattern;
 
     private Phase phase = Phase.IDLE;
+    private Phase afterPageTurn = Phase.SURVEYING;
     private Item wanted;
     private int targetQuantity;
     private int purchases;
+    private int trips;
     private int stalls;
     private int countAtLastPurchase;
+    /** How many we already had, so a partial fill can be told from none at all. */
+    private int initialCount;
     private int ticksWaited;
     private int confirmDelay;
     private int settleDelay;
     private int pageDelay;
 
+    /** True while paging to record prices; false while paging back to buy. */
+    private boolean surveying = true;
     private int currentPage;
+    private int targetPage;
     private int nextPageSlot = -1;
-    private final List<Listing> seen = new ArrayList<>();
+    private final List<Listing> surveyed = new ArrayList<>();
     private Listing chosen;
     private boolean sawOverHardCap;
     private boolean sawUnreadable;
@@ -84,29 +98,45 @@ public class AuctionHouseBuyer {
         try {
             this.pricePattern = Pattern.compile(config.auctionPriceRegex);
         } catch (Exception e) {
-            phase = Phase.FAILED;
-            lastError = "price pattern is not valid regex: " + e.getMessage();
+            fail("price pattern is not valid regex: " + e.getMessage());
             return;
         }
         this.wanted = item;
         this.targetQuantity = Math.max(1, targetQuantity);
         this.purchases = 0;
+        this.trips = 0;
         this.stalls = 0;
         this.countAtLastPurchase = countItem(client.player, item);
-        this.ticksWaited = 0;
-        this.currentPage = 0;
-        this.nextPageSlot = -1;
-        this.seen.clear();
-        this.chosen = null;
-        this.sawOverHardCap = false;
-        this.sawUnreadable = false;
+        this.initialCount = this.countAtLastPurchase;
         this.lastError = null;
         this.totalSpent = 0;
+        this.spendSummary = "";
+        beginSurvey(client);
+    }
 
-        String command = String.format(config.auctionCommandTemplate, item.getName().getString());
+    /** Re-runs the search command and starts recording prices from page one. */
+    private void beginSurvey(MinecraftClient client) {
+        if (++trips > MAX_TRIPS) {
+            finishByInventory(client, "gave up after " + MAX_TRIPS + " trips to the auction house");
+            return;
+        }
+        surveying = true;
+        currentPage = 0;
+        targetPage = 0;
+        nextPageSlot = -1;
+        surveyed.clear();
+        chosen = null;
+        sawOverHardCap = false;
+        sawUnreadable = false;
+        ticksWaited = 0;
+        sendSearch(client);
+        phase = Phase.WAITING_FOR_GUI;
+    }
+
+    private void sendSearch(MinecraftClient client) {
+        String command = String.format(config.auctionCommandTemplate, wanted.getName().getString());
         if (command.startsWith("/")) command = command.substring(1);
         client.player.networkHandler.sendChatCommand(command);
-        phase = Phase.WAITING_FOR_GUI;
     }
 
     /** Call once per client tick while active(). */
@@ -114,17 +144,19 @@ public class AuctionHouseBuyer {
         switch (phase) {
             case WAITING_FOR_GUI -> {
                 if (screen(client) != null) {
-                    phase = Phase.SCANNING;
-                } else if (++ticksWaited > 100) {
+                    ticksWaited = 0;
+                    phase = surveying ? Phase.SURVEYING : Phase.RETURNING_TO_PAGE;
+                } else if (++ticksWaited > GUI_WAIT_TICKS) {
                     fail("auction GUI never opened -- does '" + config.auctionCommandTemplate
                             + "' match your server's command?");
                 }
             }
-            case SCANNING -> doScan(client);
+            case SURVEYING -> doSurvey(client);
+            case RETURNING_TO_PAGE -> doReturnToPage(client);
             case TURNING_PAGE -> {
-                if (--pageDelay <= 0) phase = Phase.SCANNING;
+                if (--pageDelay <= 0) phase = afterPageTurn;
             }
-            case AWAITING_CONFIRMATION -> { /* held until confirmPurchase()/cancel() */ }
+            case AWAITING_CONFIRMATION -> { /* held until confirmPurchase()/declinePurchase() */ }
             case CLICKING -> doClick(client);
             case CONFIRMING -> {
                 if (--confirmDelay <= 0) {
@@ -139,72 +171,35 @@ public class AuctionHouseBuyer {
         }
     }
 
-    // ------------------------------------------------------------ scanning
+    // ------------------------------------------------------------ survey pass
 
-    private void doScan(MinecraftClient client) {
+    private void doSurvey(MinecraftClient client) {
         GenericContainerScreen s = screen(client);
         if (s == null) {
             finishByInventory(client, "auction GUI closed while reading listings");
             return;
         }
         ScreenHandler handler = s.getScreenHandler();
-        collectListings(handler);
+        readPage(handler);
 
-        boolean morePages = config.scanAllPages
-                && currentPage + 1 < config.maxAuctionPages
-                && nextPageSlot >= 0;
-        if (morePages) {
+        if (config.scanAllPages && nextPageSlot >= 0 && currentPage + 1 < config.maxAuctionPages) {
             currentPage++;
             click(client, handler.syncId, nextPageSlot);
             pageDelay = PAGE_LOAD_TICKS;
+            afterPageTurn = Phase.SURVEYING;
             phase = Phase.TURNING_PAGE;
             return;
         }
-        chooseCheapest(client);
+        decideTargetPage(client);
     }
 
-    /** Reads every container slot on the current page into `seen`. */
-    private void collectListings(ScreenHandler handler) {
-        if (handler.slots.isEmpty()) return;
-        var containerInventory = handler.slots.get(0).inventory;
-        nextPageSlot = -1;
-
-        for (Slot slot : handler.slots) {
-            // Only the container's own slots are listings. The lower rows are the
-            // player's inventory and must never be clicked as though they were.
-            if (slot.inventory != containerInventory) continue;
-            ItemStack stack = slot.getStack();
-            if (stack.isEmpty()) continue;
-
-            String name = stack.getName().getString().toLowerCase(Locale.ROOT);
-            if (name.contains("next") && (name.contains("page") || name.contains("»") || name.contains(">"))) {
-                nextPageSlot = slot.id;
-                continue;
-            }
-            if (name.contains("previous") || name.contains("back") || name.contains("close")) continue;
-
-            Double unitPrice = extractUnitPrice(stack);
-            if (unitPrice == null) { sawUnreadable = true; continue; }
-            if (unitPrice > config.hardMaxPrice) { sawOverHardCap = true; continue; }
-            seen.add(new Listing(slot.id, unitPrice, stack.getCount(), currentPage));
-        }
-    }
-
-    /**
-     * Picks the single cheapest listing across every page read. Anything above
-     * autoBuyLimit stops here for confirmation rather than being bought.
-     */
-    private void chooseCheapest(MinecraftClient client) {
-        chosen = seen.stream()
-                .filter(l -> l.page() == currentPage) // only the page we're looking at is clickable
+    /** Works out which page holds the cheapest listing and heads back to it. */
+    private void decideTargetPage(MinecraftClient client) {
+        Listing cheapest = surveyed.stream()
                 .min((a, b) -> Double.compare(a.unitPrice(), b.unitPrice()))
                 .orElse(null);
 
-        Listing cheapestAnywhere = seen.stream()
-                .min((a, b) -> Double.compare(a.unitPrice(), b.unitPrice()))
-                .orElse(null);
-
-        if (cheapestAnywhere == null) {
+        if (cheapest == null) {
             if (sawOverHardCap) {
                 fail("every listing is over the hard cap of "
                         + String.format("%,.0f", config.hardMaxPrice) + " per item");
@@ -216,13 +211,68 @@ public class AuctionHouseBuyer {
             return;
         }
 
-        // The cheapest may be on an earlier page; only the page currently open can
-        // be clicked, so buy the best on this page and let the loop come back round.
-        if (chosen == null) chosen = cheapestAnywhere;
+        targetPage = cheapest.page();
+        if (targetPage == currentPage) {
+            selectOnCurrentPage(client);   // already here, nothing to page back through
+            return;
+        }
+        // Re-run the search to get back to page one, then walk forward to the
+        // page holding the cheapest listing.
+        surveying = false;
+        currentPage = 0;
+        ticksWaited = 0;
+        sendSearch(client);
+        phase = Phase.WAITING_FOR_GUI;
+    }
 
+    private void doReturnToPage(MinecraftClient client) {
+        GenericContainerScreen s = screen(client);
+        if (s == null) {
+            finishByInventory(client, "auction GUI closed while paging back to the cheapest listing");
+            return;
+        }
+        if (currentPage >= targetPage) {
+            selectOnCurrentPage(client);
+            return;
+        }
+        readPage(s.getScreenHandler());  // refresh nextPageSlot for this page
+        if (nextPageSlot < 0) {
+            // Fewer pages than before -- listings shifted. Buy the best here.
+            selectOnCurrentPage(client);
+            return;
+        }
+        currentPage++;
+        click(client, s.getScreenHandler().syncId, nextPageSlot);
+        pageDelay = PAGE_LOAD_TICKS;
+        afterPageTurn = Phase.RETURNING_TO_PAGE;
+        phase = Phase.TURNING_PAGE;
+    }
+
+    /**
+     * Re-reads the page now on screen and picks the cheapest listing on it. The
+     * survey may be stale by now -- someone else may have bought it -- so the
+     * decision is always made against what's actually here.
+     */
+    private void selectOnCurrentPage(MinecraftClient client) {
+        GenericContainerScreen s = screen(client);
+        if (s == null) {
+            finishByInventory(client, "auction GUI closed before the purchase");
+            return;
+        }
+        List<Listing> here = new ArrayList<>();
+        readPageInto(s.getScreenHandler(), here, currentPage);
+
+        chosen = here.stream()
+                .min((a, b) -> Double.compare(a.unitPrice(), b.unitPrice()))
+                .orElse(null);
+
+        if (chosen == null) {
+            finishByInventory(client, "nothing buyable on the cheapest page any more");
+            return;
+        }
         if (chosen.unitPrice() > config.autoBuyLimit) {
             if (!config.confirmExpensivePurchases) {
-                fail("cheapest is " + String.format("%,.0f", chosen.unitPrice())
+                finishByInventory(client, "cheapest is " + String.format("%,.0f", chosen.unitPrice())
                         + "/item, over the " + String.format("%,.0f", config.autoBuyLimit) + " limit");
                 return;
             }
@@ -230,6 +280,45 @@ public class AuctionHouseBuyer {
             return;
         }
         phase = Phase.CLICKING;
+    }
+
+    // ------------------------------------------------------------ reading
+
+    private void readPage(ScreenHandler handler) {
+        readPageInto(handler, surveyed, currentPage);
+    }
+
+    private void readPageInto(ScreenHandler handler, List<Listing> into, int page) {
+        if (handler.slots.isEmpty()) return;
+        var containerInventory = handler.slots.get(0).inventory;
+        nextPageSlot = -1;
+
+        for (Slot slot : handler.slots) {
+            // Only container slots are listings. The lower rows are the player's
+            // own inventory and must never be clicked as though they were.
+            if (slot.inventory != containerInventory) continue;
+            ItemStack stack = slot.getStack();
+            if (stack.isEmpty()) continue;
+
+            String name = stack.getName().getString().toLowerCase(Locale.ROOT);
+            if (isNextPageControl(name)) { nextPageSlot = slot.id; continue; }
+            if (isOtherControl(name)) continue;
+
+            Double unitPrice = extractUnitPrice(stack);
+            if (unitPrice == null) { sawUnreadable = true; continue; }
+            if (unitPrice > config.hardMaxPrice) { sawOverHardCap = true; continue; }
+            into.add(new Listing(slot.id, unitPrice, stack.getCount(), page));
+        }
+    }
+
+    private static boolean isNextPageControl(String name) {
+        return name.contains("next") || name.contains("»") || name.contains("→");
+    }
+
+    private static boolean isOtherControl(String name) {
+        return name.contains("previous") || name.contains("back") || name.contains("close")
+                || name.contains("«") || name.contains("←") || name.contains("refresh")
+                || name.contains("sort") || name.contains("filter") || name.contains("search");
     }
 
     // ------------------------------------------------------------ buying
@@ -257,7 +346,7 @@ public class AuctionHouseBuyer {
         int now = countItem(client.player, wanted);
 
         if (now <= countAtLastPurchase) {
-            // Nothing arrived: wrong slot, insufficient funds, or the GUI isn't
+            // Nothing arrived: wrong slot, not enough money, or the GUI isn't
             // shaped the way the price pattern assumes.
             if (++stalls >= 2) {
                 finishByInventory(client, "purchases aren't arriving -- check the price pattern"
@@ -270,18 +359,13 @@ public class AuctionHouseBuyer {
         }
 
         if (now >= targetQuantity || purchases >= MAX_PURCHASES) {
-            spendSummary = String.format("bought %dx %s for ~%,.0f",
+            spendSummary = String.format("%dx %s for ~%,.0f",
                     now, wanted.getName().getString(), totalSpent);
             phase = Phase.DONE;
             return;
         }
-        if (screen(client) != null) {
-            seen.clear();
-            currentPage = 0;
-            phase = Phase.SCANNING;
-        } else {
-            finishByInventory(client, "auction GUI closed before the order was filled");
-        }
+        // Still short: survey again from scratch, since buying changed the listings.
+        beginSurvey(client);
     }
 
     /** Called from the GUI when the player approves a listing over the auto-buy limit. */
@@ -296,8 +380,12 @@ public class AuctionHouseBuyer {
         }
     }
 
+    /** Ends the trip. A partial fill still counts as success -- the build can carry on. */
     private void finishByInventory(MinecraftClient client, String reason) {
-        if (countItem(client.player, wanted) > 0 && purchases > 0) {
+        int now = countItem(client.player, wanted);
+        if (now > initialCount && purchases > 0) {
+            spendSummary = String.format("%dx %s for ~%,.0f",
+                    now, wanted.getName().getString(), totalSpent);
             phase = Phase.DONE;
         } else {
             fail(reason);
@@ -356,14 +444,14 @@ public class AuctionHouseBuyer {
 
     public String confirmationPrompt() {
         if (chosen == null || wanted == null) return "";
-        return String.format("%s at %,.0f each (%d in stack) -- over the %,.0f limit",
+        return String.format("%s at %,.0f each (x%d) -- over the %,.0f limit",
                 wanted.getName().getString(), chosen.unitPrice(), chosen.quantity(), config.autoBuyLimit);
     }
 
     public void reset() {
         phase = Phase.IDLE;
         chosen = null;
-        seen.clear();
+        surveyed.clear();
     }
 
     public Phase getPhase() { return phase; }

@@ -80,6 +80,9 @@ public class BuildExecutor {
     private String finishedMessage = "";
     private int retriesOnCurrent;
     private int consecutiveFailures;
+    /** Ticks spent mining the current obstruction; caps how long one block can stall. */
+    private int breakTicks;
+    private static final int MAX_BREAK_TICKS = 200; // 10 seconds
 
     public BuildExecutor(BuilderConfig config, SchematicSource schematic) {
         this.config = config;
@@ -627,7 +630,18 @@ public class BuildExecutor {
     /** Clear a block that's in the target position but isn't what the schematic wants. */
     private void handleBreak(MinecraftClient client, BlockPlacement bp) {
         if (client.world.getBlockState(bp.pos()).isAir()) {
+            breakTicks = 0;
             step = Step.PLACE;
+            return;
+        }
+        // Bedrock, a protected region, or the wrong tool would otherwise keep this
+        // swinging forever, so give up after a while and move on.
+        if (++breakTicks > MAX_BREAK_TICKS) {
+            breakTicks = 0;
+            statusMessage = "couldn't break the block at " + bp.pos().toShortString();
+            skipped.add(bp);
+            consecutiveFailures++;
+            advance(false);
             return;
         }
         Direction face = bp.clickFace() != null ? bp.clickFace() : Direction.UP;
