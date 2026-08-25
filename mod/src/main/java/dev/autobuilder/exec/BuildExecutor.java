@@ -97,6 +97,11 @@ public class BuildExecutor {
     public void start(MinecraftClient client) {
         if (!schematic.isLoaded()) {
             statusMessage = "no schematic loaded";
+            if (client.player != null) {
+                client.player.sendMessage(Text.literal(
+                        "[Auto Builder] Can't start: " + schematic.describe()
+                                + " -- open [ and check the Build tab status."), false);
+            }
             return;
         }
         this.verifyPassDone = false;
@@ -110,6 +115,9 @@ public class BuildExecutor {
         this.buildStartedAtMs = System.currentTimeMillis();
         this.lastVerifyAtMs = this.buildStartedAtMs;
         state = State.PLANNING;
+        if (client.player != null) {
+            client.player.sendMessage(Text.literal("[Auto Builder] Planning " + schematic.describe() + "..."), false);
+        }
     }
 
     public void pause() {
@@ -258,6 +266,9 @@ public class BuildExecutor {
                     : "nothing to build -- world already matches the schematic";
             // Head home from here too, not just from the end of doRun -- with the
             // verify pass on, a finished build always lands in this branch.
+            if (!verifyPassDone) {
+                player.sendMessage(Text.literal("[Auto Builder] " + done), false);
+            }
             if (beginReturnHomeIfWanted(player, done)) return;
             state = State.DONE;
             statusMessage = done;

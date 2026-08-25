@@ -136,8 +136,16 @@ public class BuildOptionsScreen extends Screen {
         int controlY = this.height - 28;
         addDrawableChild(ButtonWidget.builder(Text.literal("Start"), b -> {
             applyPending();
-            executor.start(MinecraftClient.getInstance());
-            close();
+            // Only close if it actually started -- previously this closed
+            // unconditionally, so a schematic that Litematica sync hadn't found
+            // yet made Start look like it did nothing at all: the menu just
+            // vanished with no error shown anywhere.
+            if (schematicSource.isLoaded()) {
+                executor.start(MinecraftClient.getInstance());
+                close();
+            } else {
+                AutoBuilderClient.LITEMATICA_SYNC.checkNow();
+            }
         }).dimensions(left, controlY, 76, 20).build());
 
         addDrawableChild(ButtonWidget.builder(Text.literal("Pause"), b -> executor.pause())
