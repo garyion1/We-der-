@@ -67,6 +67,14 @@ public class BuildExecutor {
     /** The creative-mode item fetch in progress, and which hotbar slot it's going into. */
     private Item fetchItem;
     private int fetchSlot;
+    /**
+     * True once handleFetchItem has opened its own InventoryScreen. Lets
+     * actionsBlocked() recognize that specific screen as ours rather than a
+     * foreign one, and means handleFetchItem only ever closes a screen it
+     * opened itself -- never a chat box, another mod's menu, or anything
+     * else the player had open before this step began.
+     */
+    private boolean fetchScreenOpened;
     /** Last skip/failure reason echoed to chat, so an unchanged reason repeating many times in a row doesn't spam it. */
     private String lastAnnouncedReason = "";
     /**
@@ -409,7 +417,7 @@ public class BuildExecutor {
             }
         }
 
-        if (actionsBlocked(client)) return;
+        if (actionsBlocked(client)) { resetInputs(); return; }
 
         BlockPlacement bp = plan.order().get(placementIndex);
 
@@ -584,7 +592,7 @@ public class BuildExecutor {
      * walk would stall forever.
      */
     private void handleReturnHome(MinecraftClient client, ClientPlayerEntity player) {
-        if (client.currentScreen != null && !(client.currentScreen instanceof BuildOptionsScreen)) return;
+        if (actionsBlocked(client)) { resetInputs(); return; }
         if (path.isEmpty() && pathIndex == 0) {
             path = buildPath(client, player, homePosition, false, false);
             if (path.isEmpty()) {
@@ -952,20 +960,20 @@ public class BuildExecutor {
      * tick it was needed with no visible action at all.
      */
     private void handleFetchItem(MinecraftClient client, ClientPlayerEntity player) {
+        // actionsBlocked() only lets this run once currentScreen is null or
+        // already our own InventoryScreen, so this only ever opens a screen
+        // when nothing else was there, and only ever closes one it opened
+        // itself -- never a chat box, a trade, or another mod's menu that
+        // happened to already be open.
         if (client.currentScreen == null) {
             client.setScreen(new InventoryScreen(player));
+            fetchScreenOpened = true;
         }
         if (waitTicks-- > 0) return;
         player.getInventory().setStack(fetchSlot, new ItemStack(fetchItem, 64));
         selectHotbarSlot(player, fetchSlot);
-        // Unconditional -- the earlier `instanceof InventoryScreen` check
-        // could silently leave the inventory open: a creative player's E key
-        // normally opens CreativeInventoryScreen, not this one, and if the
-        // client (or server) ever substitutes that in underneath us the type
-        // check would no longer match, so it never got closed. This state is
-        // the only one that opens a screen, and PLACE needs none open, so
-        // whatever's there when the wait ends should always be closed.
         client.setScreen(null);
+        fetchScreenOpened = false;
         fetchItem = null;
         step = Step.PLACE;
     }
@@ -1171,11 +1179,17 @@ public class BuildExecutor {
      * looking, and interacting should freeze rather than keep firing blind
      * into whatever that screen actually is. This mod's own options screen
      * is always allowed through (watching live progress shouldn't require
-     * closing it); ENSURE_ITEM (auction shopping) and FETCH_ITEM (creative
-     * pickup) manage their own screens and are exempted entirely.
+     * closing it); ENSURE_ITEM manages the auction screen itself and is
+     * exempted entirely. FETCH_ITEM is NOT blanket-exempted: if some foreign
+     * screen is already open the moment that step begins, this holds off
+     * exactly like every other step, so handleFetchItem never opens (or
+     * closes) a screen the player didn't ask it to touch -- once it opens
+     * its own InventoryScreen, that specific screen is recognized as ours
+     * and let through.
      */
     private boolean actionsBlocked(MinecraftClient client) {
-        if (step == Step.ENSURE_ITEM || step == Step.FETCH_ITEM) return false;
+        if (step == Step.ENSURE_ITEM) return false;
+        if (fetchScreenOpened && client.currentScreen instanceof InventoryScreen) return false;
         return client.currentScreen != null && !(client.currentScreen instanceof BuildOptionsScreen);
     }
 
