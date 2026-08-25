@@ -12,9 +12,7 @@ import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.item.Item;
 import net.minecraft.text.Text;
-import net.minecraft.util.math.BlockPos;
 
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -70,13 +68,19 @@ public class BuildOptionsScreen extends Screen {
      * usable height is barely 270px.
      */
     private interface RowFactory { ClickableWidget make(int x, int y, int height); }
-    private record Row(String header, RowFactory factory) {}
+    /** kind: WIDGET has a factory, HEADER has header text, STATUS_LINE reserves a
+     *  row for the live Litematica status text drawn in render(). */
+    private enum RowKind { WIDGET, HEADER, STATUS_LINE }
+    private record Row(RowKind kind, String header, RowFactory factory) {}
     private final List<Row> rows = new ArrayList<>();
     /** Where the laid-out rows ended, so render() can put free text below them. */
     private int contentBottom;
+    /** Where the reserved schematic-status row landed, so render() can draw into it. */
+    private int schematicStatusY = -1;
 
-    private void head(String text) { rows.add(new Row(text, null)); }
-    private void row(RowFactory factory) { rows.add(new Row(null, factory)); }
+    private void head(String text) { rows.add(new Row(RowKind.HEADER, text, null)); }
+    private void row(RowFactory factory) { rows.add(new Row(RowKind.WIDGET, null, factory)); }
+    private void statusLine() { rows.add(new Row(RowKind.STATUS_LINE, null, null)); }
 
     public BuildOptionsScreen(BuilderConfig config, LitematicFileSchematicSource source, BuildExecutor executor) {
         this(config, source, executor, 0);
@@ -154,29 +158,37 @@ public class BuildOptionsScreen extends Screen {
      * Start/Pause/Stop buttons, where they could not be clicked.
      */
     private void layoutRows(int x, int top) {
+        schematicStatusY = -1;
         int bottom = this.height - 46;          // clear of the footer and controls
         int available = Math.max(40, bottom - top);
 
-        int headers = 0, widgets = 0;
+        int headers = 0, others = 0;
         for (Row row : rows) {
-            if (row.header() != null) headers++; else widgets++;
+            if (row.kind() == RowKind.HEADER) headers++; else others++;
         }
-        if (widgets == 0 && headers == 0) return;
+        if (headers == 0 && others == 0) return;
 
         int headerH = 11;
         int rowH = ROW_H;
-        while (rowH > MIN_ROW_H && headers * headerH + widgets * rowH > available) rowH--;
-        if (headers * headerH + widgets * rowH > available) headerH = 9;
+        while (rowH > MIN_ROW_H && headers * headerH + others * rowH > available) rowH--;
+        if (headers * headerH + others * rowH > available) headerH = 9;
 
         int widgetH = Math.max(MIN_WIDGET_H, rowH - 1);
         int y = top;
         for (Row row : rows) {
-            if (row.header() != null) {
-                labels.add(new Label(x, y, row.header(), HEADER));
-                y += headerH;
-            } else {
-                addDrawableChild(row.factory().make(x, y, widgetH));
-                y += rowH;
+            switch (row.kind()) {
+                case HEADER -> {
+                    labels.add(new Label(x, y, row.header(), HEADER));
+                    y += headerH;
+                }
+                case STATUS_LINE -> {
+                    schematicStatusY = y;
+                    y += rowH;
+                }
+                case WIDGET -> {
+                    addDrawableChild(row.factory().make(x, y, widgetH));
+                    y += rowH;
+                }
             }
         }
         contentBottom = y;
@@ -191,13 +203,12 @@ public class BuildOptionsScreen extends Screen {
     // ---------------------------------------------------------------- tabs
 
     private void buildTab() {
+        // No file picker, no coordinates: the Build tab just shows what
+        // LitematicaSync currently found. Place and position the schematic in
+        // Litematica itself (drag it where you want it) and this follows it --
+        // the status line is drawn live in render() so it never goes stale.
         head("Schematic");
-        row((x, y, h) -> field(x, y, h, "File name (config/litematica/schematics)",
-                schematicSource.getFile() != null ? schematicSource.getFile().getFileName().toString() : "",
-                this::applySchematicFile));
-        BlockPos origin = schematicSource.getOrigin();
-        row((x, y, h) -> field(x, y, h, "Origin: x y z",
-                origin.getX() + " " + origin.getY() + " " + origin.getZ(), this::applyOrigin));
+        statusLine();
 
         head("Order");
         row((x, y, h) -> cycler(x, y, h, "Order", BuilderConfig.BuildStrategy.values(),
@@ -391,27 +402,6 @@ public class BuildOptionsScreen extends Screen {
         AutoBuilderClient.saveConfig();
     }
 
-    private void applySchematicFile(String name) {
-        if (name.isBlank()) return;
-        Path dir = MinecraftClient.getInstance().runDirectory.toPath()
-                .resolve("config").resolve("litematica").resolve("schematics");
-        schematicSource.load(dir.resolve(name.trim()), schematicSource.getOrigin());
-    }
-
-    private void applyOrigin(String text) {
-        String[] parts = text.trim().split("\\s+");
-        if (parts.length != 3) return;
-        try {
-            BlockPos origin = new BlockPos(
-                    Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
-            if (schematicSource.getFile() != null) {
-                schematicSource.load(schematicSource.getFile(), origin);
-            }
-        } catch (NumberFormatException ignored) {
-            // Keep the previous origin rather than reset it to something wrong.
-        }
-    }
-
     // ---------------------------------------------------------------- render
 
     @Override
@@ -440,6 +430,7 @@ public class BuildOptionsScreen extends Screen {
                     label.x(), label.y(), label.color());
         }
 
+        if (tab == 0 && schematicStatusY >= 0) renderSchematicStatus(context, left);
         if (tab == 5) renderItems(context, left);
         if (tab == 6) renderStatus(context, left);
 
@@ -447,6 +438,19 @@ public class BuildOptionsScreen extends Screen {
         context.drawCenteredTextWithShadow(this.textRenderer,
                 Text.literal(loaded ? schematicSource.describe() : "No schematic loaded"),
                 this.width / 2, this.height - 40, loaded ? MUTED : BAD);
+    }
+
+    /**
+     * Drawn fresh every frame rather than baked into a Row at init(), so it
+     * reflects LitematicaSync's latest read without needing the screen reopened.
+     */
+    private void renderSchematicStatus(DrawContext context, int x) {
+        boolean loaded = schematicSource.isLoaded();
+        String text = loaded
+                ? "✓ " + schematicSource.describe()
+                : "✗ " + AutoBuilderClient.LITEMATICA_SYNC.getStatus();
+        context.drawTextWithShadow(this.textRenderer, Text.literal(text),
+                x, schematicStatusY, loaded ? GOOD : WARN);
     }
 
     private void renderItems(DrawContext context, int x) {

@@ -1,9 +1,14 @@
 # Auto Litematica Builder
 
-A Fabric client mod for **Minecraft 1.21.11** that builds a `.litematic` schematic
-for you: it plans a placement order, walks (and pearl-climbs) to each spot,
-restocks missing materials from the server's auction house, and places blocks
-with human-paced, human-shaped input instead of instant robotic actions.
+A Fabric client mod for **Minecraft 1.21.11** that builds whatever schematic
+you have placed in **Litematica** for you: it plans a placement order, walks
+(and pearl-climbs) to each spot, restocks missing materials from the server's
+auction house, and places blocks with human-paced, human-shaped input instead
+of instant robotic actions.
+
+No file picker, no coordinates to type: load and position the schematic in
+Litematica the normal way, and this mod follows it automatically. Requires
+**Litematica** installed alongside it (recommended dependency, not bundled).
 
 Press **`[`** in game to open the menu.
 
@@ -36,7 +41,7 @@ Try it in **singleplayer** first.
 
 | Tab | Contains |
 |---|---|
-| **Build** | schematic file, origin, order (6 modes), layer direction, scaffold block, break wrong blocks, skip fluids / block entities, verify pass, retries |
+| **Build** | live status of what Litematica has placed, order (6 modes), layer direction, scaffold block, break wrong blocks, skip fluids / block entities, verify pass, retries |
 | **Move** | pearl climbing + reserve, jumping, sprint, max fall, reach, pathfinding effort, sneak near edges, avoid hazards, return home |
 | **Timing** | pace, delay scale, randomness, fatigue, breaks (on/interval/length/look around) |
 | **Buying** | auto-buy, `/ah` command, price regex, price limits, page scanning, confirm click, buy extra, out-of-materials policy |
@@ -115,13 +120,25 @@ most of the Minecraft classes this touches.
 ## How it fits together
 
 ```
+schematic/LitematicaBridge        Reflectively reads Litematica's currently
+                                    selected placement -- file, origin, rotation,
+                                    mirror. See "Following Litematica" below for
+                                    why this is reflection rather than a
+                                    compile-time dependency.
+schematic/LitematicaSync          Polls the bridge (once a second, paused while
+                                    a build is running) and reloads the source
+                                    when the placement changes.
 schematic/RawLitematicReader      Parses .litematic (NBT + the bit-packed
                                     BlockStates array) directly, independent of
                                     Litematica. Format cross-checked against
                                     Baritone's implementation and litemapy.
+                                    Applies the placement's rotation/mirror to
+                                    both positions and block states.
 planner/BuildPlanner              Diffs target vs world and orders placements so
                                     every block has a real neighbour to click
-                                    against by the time its turn comes.
+                                    against by the time its turn comes. O(n) via
+                                    an incrementally-maintained frontier, not a
+                                    rescan-everything loop.
 nav/PathFinder                    Grid A* with jump/drop/pearl-climb edges,
                                     hazard-aware, fall-height limited.
 nav/HumanMotion                   Aim easing, tremor, overshoot, fatigue, and
@@ -131,8 +148,36 @@ economy/AuctionHouseBuyer         Two-pass cheapest-listing search, price limits
 exec/BuildExecutor                The tick state machine tying it together:
                                     navigate -> align -> get item -> break ->
                                     place -> verify -> dwell -> rest.
+config/ConfigStore                Saves settings to config/autobuilder.properties.
 gui/BuildOptionsScreen            The [ menu.
 ```
+
+## Following Litematica
+
+`LitematicaBridge` reads Litematica's selected placement through reflection
+instead of a compile-time dependency, and tries a short list of plausible
+method names at each step (`getSelectedSchematicPlacement`/`getSelectedPlacement`,
+etc). Two reasons:
+
+- Litematica publishes no stable API for other mods, and its internals move
+  between versions and forks (upstream `maruohon/litematica` vs. the
+  `sakura-ryoko` fork some players run instead). A hard dependency that fails
+  to resolve would break this mod's build outright; reflection degrades to a
+  clear "couldn't read Litematica's placement" log line instead.
+- Only two things are actually needed from Litematica -- the `.litematic` file
+  and where/how it's placed (origin, rotation, mirror). Block data is then read
+  by this mod's own parser, which is the part that's actually been cross-checked
+  against independent implementations.
+
+If nothing loads: check the game log for `Couldn't read Litematica's
+placement` -- that means the method names this mod tries no longer match your
+Litematica version, and `LitematicaBridge.java`'s candidate name lists need a
+new entry.
+
+**Rotation/mirror caveat**: the transform assumes Litematica pivots a rotated
+or mirrored placement at its origin corner. If a version instead pivots at the
+bounding-box center, a rotated build will land offset from the real one. Test
+with an unrotated placement first.
 
 ## Known limitations
 
@@ -141,7 +186,6 @@ gui/BuildOptionsScreen            The [ menu.
   to leave them out entirely.
 - **Pearl aiming is approximate** — simulated physics (constant speed, gravity,
   drag) that won't exactly match server behaviour. Expect to tune it.
-- **No config persistence.** Settings reset each launch.
-- **The planner is O(n²)** — fine for a house, slow for tens of thousands of
-  blocks. Needs a spatial index for very large schematics.
-- **Block-entity rotation/state** beyond basic block properties is untested.
+- **In-memory-only placements can't be followed** — if you built a placement in
+  Litematica's editor but never saved it to a `.litematic` file, there's nothing
+  on disk for this mod to read.

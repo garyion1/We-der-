@@ -125,6 +125,11 @@ public class BuildExecutor {
     }
 
     public State getState() { return state; }
+
+    /** True while a build is actually underway -- used to hold off re-syncing the schematic mid-build. */
+    public boolean isActive() {
+        return state == State.PLANNING || state == State.RUNNING || state == State.RETURNING_HOME;
+    }
     public String getStatusMessage() { return statusMessage; }
     public int getPlacedCount() { return placedCount; }
     public int getTotalCount() { return plan == null ? 0 : plan.order().size(); }

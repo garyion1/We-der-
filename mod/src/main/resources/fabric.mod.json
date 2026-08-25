@@ -3,7 +3,7 @@
   "id": "autobuilder",
   "version": "${version}",
   "name": "Auto Litematica Builder",
-  "description": "Reads a .litematic schematic and builds it itself: plans a placement order, paths around the build (pearl-climbing where needed), restocks materials, and places blocks with human-paced input.",
+  "description": "Follows whatever schematic you have placed in Litematica and builds it itself: plans a placement order, paths around the build (pearl-climbing where needed), restocks materials, and places blocks with human-paced input.",
   "authors": ["you"],
   "license": "MIT",
   "environment": "client",

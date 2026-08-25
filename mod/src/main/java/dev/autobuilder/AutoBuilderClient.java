@@ -5,6 +5,7 @@ import dev.autobuilder.config.ConfigStore;
 import dev.autobuilder.exec.BuildExecutor;
 import dev.autobuilder.gui.BuildOptionsScreen;
 import dev.autobuilder.schematic.LitematicFileSchematicSource;
+import dev.autobuilder.schematic.LitematicaSync;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
@@ -19,6 +20,7 @@ public class AutoBuilderClient implements ClientModInitializer {
     public static final BuilderConfig CONFIG = new BuilderConfig();
     public static final LitematicFileSchematicSource SCHEMATIC = new LitematicFileSchematicSource();
     public static final BuildExecutor EXECUTOR = new BuildExecutor(CONFIG, SCHEMATIC);
+    public static final LitematicaSync LITEMATICA_SYNC = new LitematicaSync(SCHEMATIC, EXECUTOR::isActive);
 
     private static ConfigStore configStore;
     private static KeyBinding openMenuKey;
@@ -39,8 +41,10 @@ public class AutoBuilderClient implements ClientModInitializer {
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            LITEMATICA_SYNC.tick();
             while (openMenuKey.wasPressed()) {
                 if (client.currentScreen == null) {
+                    LITEMATICA_SYNC.checkNow(); // fresh read the moment the menu opens
                     client.setScreen(new BuildOptionsScreen(CONFIG, SCHEMATIC, EXECUTOR));
                 }
             }

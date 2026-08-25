@@ -7,6 +7,8 @@ import net.minecraft.nbt.*;
 import net.minecraft.registry.Registries;
 import net.minecraft.state.StateManager;
 import net.minecraft.state.property.Property;
+import net.minecraft.util.BlockMirror;
+import net.minecraft.util.BlockRotation;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 
@@ -30,6 +32,17 @@ import java.util.*;
 public class RawLitematicReader {
 
     public Map<BlockPos, BlockState> readAsWorldPositions(Path file, BlockPos worldOrigin) throws IOException {
+        return readAsWorldPositions(file, worldOrigin, BlockRotation.NONE, BlockMirror.NONE);
+    }
+
+    /**
+     * @param rotation how the placement was rotated in Litematica, so the built
+     *                 result matches what's actually shown in-world rather than
+     *                 always the schematic's saved orientation.
+     * @param mirror   likewise for a mirrored placement.
+     */
+    public Map<BlockPos, BlockState> readAsWorldPositions(Path file, BlockPos worldOrigin,
+                                                          BlockRotation rotation, BlockMirror mirror) throws IOException {
         NbtCompound root;
         try (InputStream in = Files.newInputStream(file)) {
             root = NbtIo.readCompressed(in, NbtSizeTracker.ofUnlimitedBytes());
@@ -42,10 +55,40 @@ public class RawLitematicReader {
             Optional<NbtCompound> region = regions.getCompound(regionName);
             if (region.isEmpty()) continue;
             for (Map.Entry<BlockPos, BlockState> e : parseRegion(region.get()).entrySet()) {
-                world.put(worldOrigin.add(e.getKey()), e.getValue());
+                BlockPos transformedPos = transform(e.getKey(), rotation, mirror);
+                BlockState transformedState = e.getValue().mirror(mirror).rotate(rotation);
+                world.put(worldOrigin.add(transformedPos), transformedState);
             }
         }
         return world;
+    }
+
+    /**
+     * Mirror then rotate, both pivoted at the region-local origin (0,0,0) --
+     * the same order applied to the block state itself just above, so the
+     * position and the block's own facing/axis properties stay consistent.
+     *
+     * This assumes Litematica pivots a placement's transform at its origin
+     * corner. If a placement's actual pivot is its bounding-box center instead,
+     * a rotated/mirrored build will land offset from the real one -- flagged
+     * here since it's the one part of this transform not cross-checked against
+     * a second implementation the way the parser format itself was.
+     */
+    private static BlockPos transform(BlockPos local, BlockRotation rotation, BlockMirror mirror) {
+        int x = local.getX(), z = local.getZ();
+        switch (mirror) {
+            case FRONT_BACK -> x = -x;
+            case LEFT_RIGHT -> z = -z;
+            default -> { /* no mirror */ }
+        }
+        int rx = x, rz = z;
+        switch (rotation) {
+            case CLOCKWISE_90 -> { rx = -z; rz = x; }
+            case CLOCKWISE_180 -> { rx = -x; rz = -z; }
+            case COUNTERCLOCKWISE_90 -> { rx = z; rz = -x; }
+            default -> { /* no rotation */ }
+        }
+        return new BlockPos(rx, local.getY(), rz);
     }
 
     /**
