@@ -1,0 +1,19 @@
+{
+  "key.autobuilder.open_menu": "Open Auto Builder menu",
+  "key.categories.autobuilder": "Auto Litematica Builder",
+
+  "autobuilder.screen.title": "Auto Builder",
+  "autobuilder.screen.strategy": "Build order",
+  "autobuilder.screen.pace": "Pace",
+  "autobuilder.screen.use_pearls": "Pearl-climb for verticality",
+  "autobuilder.screen.auto_buy": "Auto-restock from /ah",
+  "autobuilder.screen.start": "Start build",
+  "autobuilder.screen.pause": "Pause",
+  "autobuilder.screen.stop": "Stop",
+  "autobuilder.screen.no_schematic": "No Litematica schematic is loaded/placed. Load one and enable a placement first.",
+
+  "autobuilder.chat.materials_needed": "Need %s more %s (missing from inventory).",
+  "autobuilder.chat.buying": "Shopping /ah for %s, cheapest listing found: %s each.",
+  "autobuilder.chat.build_done": "Build complete: %s blocks placed.",
+  "autobuilder.chat.stopped": "Auto Builder stopped."
+}

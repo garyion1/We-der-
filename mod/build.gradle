@@ -1,0 +1,55 @@
+plugins {
+    id 'fabric-loom' version '1.9-SNAPSHOT'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    maven { url "https://maven.masa.dev/" } // Litematica / MaLiLib (masa's mods)
+    maven { url "https://maven.nucleoid.xyz/" } // Baritone builds mirror (adjust if stale)
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+    // Litematica itself is NOT a hard dependency: we parse .litematic files
+    // directly (see schematic/RawLitematicReader.java) the same way Baritone's
+    // own litematica integration does, rather than reaching into Litematica's
+    // internal, non-public API surface which changes across versions. Litematica
+    // is only useful here as the tool you use to preview/position the build in
+    // the world before this mod builds it. Uncomment if you later want to read
+    // its live-loaded placement data directly instead of re-reading the file.
+    // modCompileOnly "fi.dy.masa.litematica:litematica:${project.minecraft_version}-SNAPSHOT"
+    // modCompileOnly "fi.dy.masa.malilib:malilib:${project.minecraft_version}-SNAPSHOT"
+}
+
+loom {
+    accessWidenerPath = file("src/main/resources/autobuilder.accesswidener")
+}
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
