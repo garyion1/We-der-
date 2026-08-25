@@ -307,6 +307,17 @@ public class AuctionHouseBuyer {
             if (isNextPageControl(name)) { nextPageSlot = slot.id; continue; }
             if (isOtherControl(name)) continue;
 
+            // The search command only asks the server to search by name --
+            // it doesn't guarantee every result actually is the item asked
+            // for. A server's search can be looser than an exact match (a
+            // partial-text search on "concrete" would surface every color,
+            // not just the one searched for), and without this check any
+            // priced listing on the page gets bought and placed as though it
+            // were the right material regardless of its actual item. This is
+            // exactly the kind of mistake that's invisible until a wrong-
+            // colored block turns up mid-build with no explanation.
+            if (stack.getItem() != wanted) continue;
+
             Double unitPrice = extractUnitPrice(stack);
             if (unitPrice == null) { sawUnreadable = true; continue; }
             if (unitPrice > config.hardMaxPrice) { sawOverHardCap = true; continue; }
