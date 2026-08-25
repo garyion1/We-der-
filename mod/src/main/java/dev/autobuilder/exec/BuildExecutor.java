@@ -77,6 +77,32 @@ public class BuildExecutor {
 
     private boolean verifyPassDone;
     private BlockPos homePosition;
+    /**
+     * The schematic's own bounding box, padded by BUILD_AREA_MARGIN. Build
+     * navigation is fenced to this box so the pathfinder can never wander off
+     * looking for a route -- it either finds one that stays near the
+     * structure, or the block is skipped. Not applied to the return-home walk.
+     */
+    private record BuildArea(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        static BuildArea of(Collection<BlockPos> positions) {
+            int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+            int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+            for (BlockPos p : positions) {
+                minX = Math.min(minX, p.getX()); maxX = Math.max(maxX, p.getX());
+                minY = Math.min(minY, p.getY()); maxY = Math.max(maxY, p.getY());
+                minZ = Math.min(minZ, p.getZ()); maxZ = Math.max(maxZ, p.getZ());
+            }
+            return new BuildArea(minX, minY, minZ, maxX, maxY, maxZ);
+        }
+
+        boolean contains(BlockPos p, int margin) {
+            return p.getX() >= minX - margin && p.getX() <= maxX + margin
+                    && p.getY() >= minY - margin && p.getY() <= maxY + margin
+                    && p.getZ() >= minZ - margin && p.getZ() <= maxZ + margin;
+        }
+    }
+    private static final int BUILD_AREA_MARGIN = 6;
+    private BuildArea buildArea;
     /** Completion text held while walking home, so the final status keeps it. */
     private String finishedMessage = "";
     private int retriesOnCurrent;
@@ -209,6 +235,7 @@ public class BuildExecutor {
 
     private void doPlan(MinecraftClient client, ClientPlayerEntity player) {
         Map<BlockPos, BlockState> target = schematic.getTargetBlocks();
+        buildArea = target.isEmpty() ? null : BuildArea.of(target.keySet());
         Map<BlockPos, BlockState> toPlace = new HashMap<>();
         for (var entry : target.entrySet()) {
             BlockState wanted = entry.getValue();
@@ -430,7 +457,7 @@ public class BuildExecutor {
     private void handleNavigate(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (path.isEmpty() && pathIndex == 0) {
             BlockPos standGoal = computeStandPosition(client, player, bp);
-            path = buildPath(client, player, standGoal, true);
+            path = buildPath(client, player, standGoal, true, true);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
                 statusMessage = "couldn't find a way to " + bp.pos().toShortString();
@@ -475,7 +502,7 @@ public class BuildExecutor {
      */
     private void handleReturnHome(MinecraftClient client, ClientPlayerEntity player) {
         if (path.isEmpty() && pathIndex == 0) {
-            path = buildPath(client, player, homePosition, false);
+            path = buildPath(client, player, homePosition, false, false);
             if (path.isEmpty()) {
                 finishReturn("couldn't find a way back to the start");
                 return;
@@ -518,9 +545,16 @@ public class BuildExecutor {
     }
 
     private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player,
-                                                BlockPos goal, boolean allowPearls) {
+                                                BlockPos goal, boolean allowPearls, boolean fenceToSchematic) {
+        // Fencing keeps the search from ever proposing a step far from the
+        // structure -- without it, a blocked direct route makes A* fan out in
+        // every direction looking for *a* way through, which is what sent the
+        // bot wandering off. If the player is currently outside the fence
+        // (shouldn't normally happen) drop it rather than trap them with no path.
+        boolean applyFence = fenceToSchematic && buildArea != null
+                && buildArea.contains(player.getBlockPos(), BUILD_AREA_MARGIN);
         PathFinder finder = new PathFinder(
-                pos -> isStandable(client, pos),
+                pos -> isStandable(client, pos) && (!applyFence || buildArea.contains(pos, BUILD_AREA_MARGIN)),
                 allowPearls && config.usePearlClimbing, 32,
                 config.allowJump, config.maxFallDistance);
         return finder.findPath(player.getBlockPos(), goal, config.maxPathNodes);
