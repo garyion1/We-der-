@@ -1,0 +1,6 @@
+{
+  "key.autobuilder.open_menu": "Open Auto Builder menu",
+
+  "autobuilder.chat.materials_needed": "Need %s more %s.",
+  "autobuilder.chat.build_done": "Build complete: %s blocks placed."
+}
