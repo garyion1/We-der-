@@ -431,6 +431,7 @@ public class BuildExecutor {
             path = buildPath(client, player, standGoal, true);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
+                statusMessage = "couldn't find a way to " + bp.pos().toShortString();
                 skipped.add(bp);
                 consecutiveFailures++;
                 resetInputs();

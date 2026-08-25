@@ -122,8 +122,17 @@ public class PathFinder {
         return edges;
     }
 
+    /**
+     * Must never overestimate the true remaining cost, or A* stops being
+     * reliable at finding a path at all -- not just stops being optimal.
+     * Edge costs above are ~1 per block moved, so squared distance (the
+     * previous version of this) overestimates quadratically once the goal is
+     * more than a couple of blocks away, which starves the search of budget
+     * on anything but a straight unobstructed line to the goal. Plain
+     * (non-squared) distance keeps it admissible.
+     */
     private double heuristic(BlockPos a, BlockPos b) {
-        return a.getSquaredDistance(b.getX(), b.getY(), b.getZ());
+        return Math.sqrt(a.getSquaredDistance(b.getX(), b.getY(), b.getZ()));
     }
 
     private List<PathStep> reconstruct(Map<BlockPos, BlockPos> cameFrom, Map<BlockPos, StepType> cameVia,
