@@ -14,6 +14,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
@@ -561,15 +562,30 @@ public class BuildExecutor {
     }
 
     private BlockPos computeStandPosition(BlockPlacement bp) {
-        // For removals or blocks with unknown support: stand one below the target
-        // (can reach up to break or click), and let the pathfinder handle routing.
         if (bp.supportNeighbor() == null || bp.isRemoval()) return bp.pos().down();
-        // Support is ABOVE the target (placing underneath something): stand two below.
-        if (bp.clickFace() == Direction.DOWN) return bp.pos().down(2);
-        // Common case (support below, clickFace=UP, or side support): navigate to the
-        // target position itself. It's empty before placement, the support neighbour
-        // is always adjacent, and any face of it is within the 4-block reach from there.
-        return bp.pos();
+        Direction face = bp.clickFace();
+        if (face == null) return bp.pos().down();
+
+        // NEVER return bp.pos() -- the bot would be standing inside the target block,
+        // and the server rejects block placement when it collides with the player.
+
+        if (face == Direction.UP) {
+            // Placing on top: support is directly below target.
+            // Stand 1 block north of target at the same Y. In a bottom-up build the
+            // layer below (target.Y-1) is already solid everywhere, so target.north().down()
+            // is a solid floor block -- this position is always standable.
+            return bp.pos().north();
+        }
+        if (face == Direction.DOWN) {
+            // Placing on ceiling: support is directly above target.
+            // Stand 2 below the target, look up. feet.down() = target.down(3) may or
+            // may not be solid, but if the structure has any floor below us this works.
+            return bp.pos().down(2);
+        }
+        // Horizontal face: support is to one side of the target.
+        // Stand 1 block past the target in the click direction so we are neither
+        // inside the target nor inside the support, and can reach back to click.
+        return bp.pos().offset(face);
     }
 
     private boolean isStandable(MinecraftClient client, BlockPos feet) {
@@ -719,6 +735,16 @@ public class BuildExecutor {
             } else {
                 step = Step.PLACE;
             }
+            return;
+        }
+
+        // Creative mode: just put the item in the active hotbar slot directly.
+        // The server accepts creative inventory changes, so no purchase needed.
+        if (player.getAbilities().creativeMode) {
+            int slot = player.getInventory().getSelectedSlot();
+            player.getInventory().setStack(slot, new ItemStack(needed, 64));
+            selectHotbarSlot(player, slot);
+            step = Step.PLACE;
             return;
         }
 
