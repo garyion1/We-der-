@@ -35,13 +35,16 @@ public class PathFinder {
     private final WalkableCheck walkable;
     private final boolean allowPearlClimb;
     private final int maxPearlRise;
-    private final int pearlSearchRadius;
+    private final boolean allowJump;
+    private final int maxFallDistance;
 
-    public PathFinder(WalkableCheck walkable, boolean allowPearlClimb, int maxPearlRise) {
+    public PathFinder(WalkableCheck walkable, boolean allowPearlClimb, int maxPearlRise,
+                      boolean allowJump, int maxFallDistance) {
         this.walkable = walkable;
         this.allowPearlClimb = allowPearlClimb;
         this.maxPearlRise = maxPearlRise;
-        this.pearlSearchRadius = 2; // pearls don't land with pinpoint accuracy; keep the target column tight
+        this.allowJump = allowJump;
+        this.maxFallDistance = Math.max(0, maxFallDistance);
     }
 
     public List<PathStep> findPath(BlockPos start, BlockPos goal, int maxExpandedNodes) {
@@ -86,10 +89,20 @@ public class PathFinder {
             double dist = (d[0] != 0 && d[1] != 0) ? 1.41421356 : 1.0;
             if (walkable.isStandable(flat)) {
                 edges.add(new Edge(flat, StepType.WALK, dist));
-            } else if (walkable.isStandable(flat.up())) {
+            } else if (allowJump && walkable.isStandable(flat.up())) {
                 edges.add(new Edge(flat.up(), StepType.JUMP, dist * 1.2));
-            } else if (walkable.isStandable(flat.down())) {
-                edges.add(new Edge(flat.down(), StepType.DROP, dist * 1.1));
+            } else {
+                // Look for a landing within the allowed fall height rather than
+                // only one block down -- and never propose a drop taller than the
+                // configured limit, which is what stops it walking off cliffs.
+                for (int drop = 1; drop <= maxFallDistance; drop++) {
+                    BlockPos landing = flat.down(drop);
+                    if (walkable.isStandable(landing)) {
+                        // Taller drops cost more, so a gentle route wins when both exist.
+                        edges.add(new Edge(landing, StepType.DROP, dist * (1.1 + drop * 0.25)));
+                        break;
+                    }
+                }
             }
         }
 

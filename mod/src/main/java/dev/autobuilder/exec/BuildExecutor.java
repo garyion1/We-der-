@@ -36,7 +36,7 @@ import java.util.*;
  */
 public class BuildExecutor {
 
-    public enum State { IDLE, PLANNING, RUNNING, PAUSED, DONE, FAILED }
+    public enum State { IDLE, PLANNING, RUNNING, PAUSED, RETURNING_HOME, DONE, FAILED }
     private enum Step {
         NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, BREAK, PLACE, DWELL, RETRY_WAIT, REST, SKIP
     }
@@ -75,8 +75,9 @@ public class BuildExecutor {
     private int walkGazeTicks;
 
     private boolean verifyPassDone;
-    private boolean returningHome;
     private BlockPos homePosition;
+    /** Completion text held while walking home, so the final status keeps it. */
+    private String finishedMessage = "";
     private int retriesOnCurrent;
     private int consecutiveFailures;
 
@@ -93,7 +94,6 @@ public class BuildExecutor {
             return;
         }
         this.verifyPassDone = false;
-        this.returningHome = false;
         this.retriesOnCurrent = 0;
         this.consecutiveFailures = 0;
         this.homePosition = client.player != null ? client.player.getBlockPos() : null;
@@ -137,6 +137,7 @@ public class BuildExecutor {
         switch (state) {
             case PLANNING -> doPlan(client, player);
             case RUNNING -> doRun(client, player);
+            case RETURNING_HOME -> handleReturnHome(client, player);
             default -> { /* IDLE / PAUSED / DONE / FAILED: no per-tick work */ }
         }
     }
@@ -181,10 +182,14 @@ public class BuildExecutor {
 
         if (plan.order().isEmpty()) {
             resetInputs();
-            state = State.DONE;
-            statusMessage = verifyPassDone
+            String done = verifyPassDone
                     ? "complete and verified: " + placedCount + " placed"
                     : "nothing to build -- world already matches the schematic";
+            // Head home from here too, not just from the end of doRun -- with the
+            // verify pass on, a finished build always lands in this branch.
+            if (beginReturnHomeIfWanted(player, done)) return;
+            state = State.DONE;
+            statusMessage = done;
             return;
         }
 
@@ -214,17 +219,13 @@ public class BuildExecutor {
                 state = State.PLANNING;
                 return;
             }
-            if (config.returnHomeWhenDone && homePosition != null
-                    && !player.getBlockPos().isWithinDistance(homePosition, 2.0)) {
-                returningHome = true;
-                handleNavigateTo(client, player, homePosition);
-                return;
-            }
             resetInputs();
-            state = State.DONE;
-            statusMessage = "complete: " + placedCount + " placed"
+            String done = "complete: " + placedCount + " placed"
                     + (skipped.isEmpty() ? "" : ", " + skipped.size() + " skipped");
             player.sendMessage(Text.translatable("autobuilder.chat.build_done", placedCount), false);
+            if (beginReturnHomeIfWanted(player, done)) return;
+            state = State.DONE;
+            statusMessage = done;
             return;
         }
 
@@ -313,7 +314,7 @@ public class BuildExecutor {
     private void handleNavigate(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
         if (path.isEmpty() && pathIndex == 0) {
             BlockPos standGoal = computeStandPosition(bp);
-            path = buildPath(client, player, standGoal);
+            path = buildPath(client, player, standGoal, true);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
                 skipped.add(bp);
@@ -334,31 +335,54 @@ public class BuildExecutor {
         walkOneStep(client, player);
     }
 
-    /** Walking used both for reaching a block and for heading home afterwards. */
-    private void handleNavigateTo(MinecraftClient client, ClientPlayerEntity player, BlockPos goal) {
+    /**
+     * Switches to walking home, if that's wanted and we aren't already there.
+     * Returns true if the walk has taken over.
+     */
+    private boolean beginReturnHomeIfWanted(ClientPlayerEntity player, String completionMessage) {
+        if (!config.returnHomeWhenDone || homePosition == null) return false;
+        if (player.getBlockPos().isWithinDistance(homePosition, 2.0)) return false;
+        finishedMessage = completionMessage;
+        path = List.of();
+        pathIndex = 0;
+        state = State.RETURNING_HOME;
+        statusMessage = "heading back to the start";
+        return true;
+    }
+
+    /**
+     * Walks back to where the build began. Deliberately routed without pearl
+     * climbing: the pearl steps are driven by the placement state machine, which
+     * isn't running any more, so a pearl step here would never be thrown and the
+     * walk would stall forever.
+     */
+    private void handleReturnHome(MinecraftClient client, ClientPlayerEntity player) {
         if (path.isEmpty() && pathIndex == 0) {
-            path = buildPath(client, player, goal);
+            path = buildPath(client, player, homePosition, false);
             if (path.isEmpty()) {
-                returningHome = false;
-                resetInputs();
-                state = State.DONE;
-                statusMessage = "complete (couldn't find a way back to the start)";
+                finishReturn("couldn't find a way back to the start");
                 return;
             }
         }
-        if (pathIndex >= path.size()) {
-            returningHome = false;
-            resetInputs();
-            state = State.DONE;
-            statusMessage = "complete: " + placedCount + " placed, back at the start";
+        if (pathIndex >= path.size() || player.getBlockPos().isWithinDistance(homePosition, 2.0)) {
+            finishReturn("back at the start");
             return;
         }
         walkOneStep(client, player);
     }
 
-    private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player, BlockPos goal) {
+    private void finishReturn(String note) {
+        resetInputs();
+        state = State.DONE;
+        statusMessage = finishedMessage + " -- " + note;
+    }
+
+    private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player,
+                                                BlockPos goal, boolean allowPearls) {
         PathFinder finder = new PathFinder(
-                pos -> isStandable(client, pos), config.usePearlClimbing, 32);
+                pos -> isStandable(client, pos),
+                allowPearls && config.usePearlClimbing, 32,
+                config.allowJump, config.maxFallDistance);
         return finder.findPath(player.getBlockPos(), goal, config.maxPathNodes);
     }
 
