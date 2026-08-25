@@ -57,6 +57,22 @@ public class BuildOptionsScreen extends Screen {
     private static final int WARN = 0xFFE8B75B;
     private static final int BAD = 0xFFE8697A;
     private static final int TRACK_OFF = 0xFF383E4A;
+    // Depth cues on top of the flat palette: a dimmed backdrop so the panel
+    // reads as a surface floating over the game rather than a flat overlay,
+    // a soft drop shadow and border for edge definition, and a couple of
+    // shades for giving flat buttons/switches a slight tactile pop.
+    private static final int SCREEN_DIM = 0x9B0A0C12;
+    private static final int PANEL_BORDER = 0x33FFFFFF;
+    private static final int SHADOW = 0x4C000000;
+    private static final int BEVEL_LIGHT = 0x22FFFFFF;
+    private static final int BEVEL_DARK = 0x2E000000;
+
+    private void cutCorners(DrawContext context, int x1, int y1, int x2, int y2, int eraseColor) {
+        context.fill(x1, y1, x1 + 1, y1 + 1, eraseColor);
+        context.fill(x2 - 1, y1, x2, y1 + 1, eraseColor);
+        context.fill(x1, y2 - 1, x1 + 1, y2, eraseColor);
+        context.fill(x2 - 1, y2 - 1, x2, y2, eraseColor);
+    }
 
     private final BuilderConfig config;
     private final LitematicFileSchematicSource schematicSource;
@@ -431,16 +447,32 @@ public class BuildOptionsScreen extends Screen {
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         int left = panelLeft;
-        context.fill(left - 10, 20, left + PANEL_W + 10, this.height - 4, BG_PANEL);
-        context.fill(left - 10, 20, left + PANEL_W + 10, 21, ACCENT_LINE);
+        int px1 = left - 10, py1 = 20, px2 = left + PANEL_W + 10, py2 = this.height - 4;
+
+        // Dim the game behind the panel so it reads as a surface floating in
+        // front rather than options text scattered over the world.
+        context.fill(0, 0, this.width, this.height, SCREEN_DIM);
+
+        // Soft drop shadow, offset down-right, faded by drawing it in from the
+        // panel edge rather than as a single hard-edged block.
+        context.fill(px1 + 4, py2, px2 + 4, py2 + 4, SHADOW);
+        context.fill(px2, py1 + 4, px2 + 4, py2 + 4, SHADOW);
+
+        context.fill(px1, py1, px2, py2, BG_PANEL);
+        cutCorners(context, px1, py1, px2, py2, SCREEN_DIM);
+        drawOutline(context, px1, py1, px2 - px1, py2 - py1, PANEL_BORDER);
+        context.fill(px1 + 1, py1 + 1, px2 - 1, py1 + 2, ACCENT_LINE);
 
         // Field backgrounds drawn before super.render() so the (background-less)
         // TextFieldWidgets paint their text on top of our flat box, not the
         // other way around.
         for (Placed p : placedOptions) {
             if (p.row().kind() == RowKind.FIELD) {
-                context.fill(p.x() - 3, p.y() - 2, p.x() + p.w() + 3, p.y() + p.h() + 2, BG_FIELD);
-                context.fill(p.x() - 3, p.y() + p.h() + 1, p.x() + p.w() + 3, p.y() + p.h() + 2, ACCENT_LINE);
+                int fx1 = p.x() - 3, fy1 = p.y() - 2, fx2 = p.x() + p.w() + 3, fy2 = p.y() + p.h() + 2;
+                context.fill(fx1, fy1, fx2, fy2, BG_FIELD);
+                cutCorners(context, fx1, fy1, fx2, fy2, BG_PANEL);
+                drawOutline(context, fx1, fy1, fx2 - fx1, fy2 - fy1, PANEL_BORDER);
+                context.fill(fx1, fy2 - 1, fx2, fy2, ACCENT_LINE);
             }
         }
 
@@ -451,7 +483,12 @@ public class BuildOptionsScreen extends Screen {
         renderTabs(context, mouseX, mouseY);
 
         for (Label label : labels) {
-            context.drawTextWithShadow(this.textRenderer, Text.literal(label.text()), label.x(), label.y(), label.color());
+            // A small accent tick and a hairline rule under each section header,
+            // rather than dim text sitting bare against the options below it.
+            context.fill(label.x(), label.y() + 1, label.x() + 2, label.y() + 7, ACCENT_LINE);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(label.text()),
+                    label.x() + 6, label.y(), label.color());
+            context.fill(label.x() + 6, label.y() + 9, panelLeft + PANEL_W, label.y() + 10, DIVIDER);
         }
         for (Placed p : placedOptions) {
             if (p.row().kind() == RowKind.OPTION) renderOption(context, p, mouseX, mouseY);
@@ -476,13 +513,19 @@ public class BuildOptionsScreen extends Screen {
             int[] z = tabZones.get(i);
             boolean active = i == tab;
             boolean hovered = mouseX >= z[0] && mouseX < z[0] + z[1] && mouseY >= panelTop && mouseY < panelTop + TAB_H;
-            if (hovered && !active) context.fill(z[0], panelTop, z[0] + z[1], panelTop + TAB_H, HOVER_BG);
+            if (active) {
+                context.fill(z[0], panelTop + 1, z[0] + z[1], panelTop + TAB_H - 1, HOVER_BG);
+                cutCorners(context, z[0], panelTop + 1, z[0] + z[1], panelTop + TAB_H - 1, BG_PANEL);
+            } else if (hovered) {
+                context.fill(z[0], panelTop, z[0] + z[1], panelTop + TAB_H, HOVER_BG);
+            }
             int color = active ? ACCENT : (hovered ? TEXT_PRIMARY : TEXT_SECONDARY);
             int tw = this.textRenderer.getWidth(TABS[i]);
             context.drawTextWithShadow(this.textRenderer, Text.literal(TABS[i]),
                     z[0] + (z[1] - tw) / 2, panelTop + (TAB_H - 8) / 2, color);
-            if (active) context.fill(z[0], panelTop + TAB_H, z[0] + z[1], panelTop + TAB_H + 2, ACCENT);
+            if (active) context.fill(z[0] + 2, panelTop + TAB_H, z[0] + z[1] - 2, panelTop + TAB_H + 2, ACCENT);
         }
+        context.fill(panelLeft, panelTop + TAB_H + 2, panelLeft + PANEL_W, panelTop + TAB_H + 3, DIVIDER);
     }
 
     private void renderOption(DrawContext context, Placed p, int mouseX, int mouseY) {
@@ -507,28 +550,39 @@ public class BuildOptionsScreen extends Screen {
         int tx = p.x() + p.w() - trackW - 2;
         int ty = p.y() + (p.h() - trackH) / 2;
         context.fill(tx, ty, tx + trackW, ty + trackH, on ? ACCENT : TRACK_OFF);
+        context.fill(tx, ty + trackH - 1, tx + trackW, ty + trackH, BEVEL_DARK);
+        cutCorners(context, tx, ty, tx + trackW, ty + trackH, BG_PANEL);
         int thumb = 8;
         int thumbX = on ? tx + trackW - thumb - 2 : tx + 2;
         int thumbY = ty + (trackH - thumb) / 2;
         context.fill(thumbX, thumbY, thumbX + thumb, thumbY + thumb, TEXT_PRIMARY);
+        context.fill(thumbX, thumbY, thumbX + thumb, thumbY + 1, BEVEL_LIGHT);
+        context.fill(thumbX, thumbY + thumb - 1, thumbX + thumb, thumbY + thumb, BEVEL_DARK);
     }
 
     private void renderControlButton(DrawContext context, ClickZone zone, int mouseX, int mouseY) {
         boolean hovered = zone.contains(mouseX, mouseY);
 
+        int zx = zone.x(), zy = zone.y(), zx2 = zone.x() + zone.w(), zy2 = zone.y() + zone.h();
         switch (zone.style()) {
-            case PRIMARY -> context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(),
-                    hovered ? ACCENT : ACCENT_LINE);
+            case PRIMARY -> {
+                context.fill(zx, zy, zx2, zy2, hovered ? ACCENT : ACCENT_LINE);
+                context.fill(zx, zy, zx2, zy + 1, BEVEL_LIGHT);
+                context.fill(zx, zy2 - 1, zx2, zy2, BEVEL_DARK);
+                cutCorners(context, zx, zy, zx2, zy2, BG_PANEL);
+            }
             case DANGER -> {
-                if (hovered) context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(), HOVER_BG);
-                drawOutline(context, zone.x(), zone.y(), zone.w(), zone.h(), BAD);
+                if (hovered) context.fill(zx, zy, zx2, zy2, HOVER_BG);
+                drawOutline(context, zx, zy, zone.w(), zone.h(), BAD);
+                cutCorners(context, zx, zy, zx2, zy2, BG_PANEL);
             }
             case GHOST -> {
-                if (hovered) context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(), HOVER_BG);
-                drawOutline(context, zone.x(), zone.y(), zone.w(), zone.h(), TEXT_DIM);
+                if (hovered) context.fill(zx, zy, zx2, zy2, HOVER_BG);
+                drawOutline(context, zx, zy, zone.w(), zone.h(), TEXT_DIM);
+                cutCorners(context, zx, zy, zx2, zy2, BG_PANEL);
             }
             case PLAIN -> {
-                if (hovered) context.fill(zone.x(), zone.y(), zone.x() + zone.w(), zone.y() + zone.h(), HOVER_BG);
+                if (hovered) context.fill(zx, zy, zx2, zy2, HOVER_BG);
             }
         }
 
@@ -596,9 +650,17 @@ public class BuildOptionsScreen extends Screen {
         int total = executor.getTotalCount();
         int percent = total == 0 ? 0 : done * 100 / total;
 
-        context.fill(x, y, x + PANEL_W, y + 8, BG_FIELD);
-        context.fill(x, y, x + (int) (PANEL_W * (percent / 100.0)), y + 8, GOOD);
-        y += 14;
+        int barH = 10;
+        context.fill(x, y, x + PANEL_W, y + barH, BG_FIELD);
+        int fillW = (int) (PANEL_W * (percent / 100.0));
+        if (fillW > 0) context.fill(x, y, x + fillW, y + barH, GOOD);
+        cutCorners(context, x, y, x + PANEL_W, y + barH, BG_PANEL);
+        drawOutline(context, x, y, PANEL_W, barH, PANEL_BORDER);
+        String pctText = percent + "%";
+        int ptw = this.textRenderer.getWidth(pctText);
+        context.drawTextWithShadow(this.textRenderer, Text.literal(pctText),
+                x + PANEL_W - ptw - 3, y + 1, TEXT_PRIMARY);
+        y += barH + 6;
 
         line(context, x, y, "Progress", total == 0 ? "no plan yet" : done + " / " + total + "  (" + percent + "%)", GOOD); y += 12;
         line(context, x, y, "State", executor.getState().toString(), GOOD); y += 12;
