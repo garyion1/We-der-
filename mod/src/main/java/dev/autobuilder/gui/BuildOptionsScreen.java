@@ -8,6 +8,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.item.Item;
 import net.minecraft.text.Text;
@@ -39,6 +40,8 @@ public class BuildOptionsScreen extends Screen {
     private static final int PANEL_W = 310;
     private static final int ROW_H = 21;
     private static final int TAB_H = 18;
+    private static final int MIN_ROW_H = 13;
+    private static final int MIN_WIDGET_H = 12;
 
     private static final int TITLE = 0xFFFFFF;
     private static final int HEADER = 0xFFD68A;
@@ -59,6 +62,21 @@ public class BuildOptionsScreen extends Screen {
     private final List<Label> labels = new ArrayList<>();
 
     private record Label(int x, int y, String text, int color) {}
+
+    /**
+     * Rows are collected first and positioned afterwards, so the layout can
+     * measure how much room it actually has. Placing them as they were declared
+     * overflowed the footer and control buttons at higher GUI scales, where the
+     * usable height is barely 270px.
+     */
+    private interface RowFactory { ClickableWidget make(int x, int y, int height); }
+    private record Row(String header, RowFactory factory) {}
+    private final List<Row> rows = new ArrayList<>();
+    /** Where the laid-out rows ended, so render() can put free text below them. */
+    private int contentBottom;
+
+    private void head(String text) { rows.add(new Row(text, null)); }
+    private void row(RowFactory factory) { rows.add(new Row(null, factory)); }
 
     public BuildOptionsScreen(BuilderConfig config, LitematicFileSchematicSource source, BuildExecutor executor) {
         this(config, source, executor, 0);
@@ -89,15 +107,26 @@ public class BuildOptionsScreen extends Screen {
                     .dimensions(left + i * tabW, top, tabW - 2, TAB_H).build());
         }
 
-        int y = top + TAB_H + 8;
+        rows.clear();
         switch (tab) {
-            case 0 -> buildTab(left, y);
-            case 1 -> moveTab(left, y);
-            case 2 -> timingTab(left, y);
-            case 3 -> buyingTab(left, y);
-            case 4 -> safetyTab(left, y);
-            case 5 -> itemsTab(left, y);
-            default -> statusTab(left, y);
+            case 0 -> buildTab();
+            case 1 -> moveTab();
+            case 2 -> timingTab();
+            case 3 -> buyingTab();
+            case 4 -> safetyTab();
+            case 5 -> itemsTab();
+            default -> statusTab();
+        }
+        layoutRows(left, top + TAB_H + 8);
+
+        if (tab == 6 && executor.isAwaitingPurchaseConfirmation()) {
+            int approveY = this.height - 52;
+            int halfW = PANEL_W / 2 - 2;
+            addDrawableChild(ButtonWidget.builder(Text.literal("Approve purchase"),
+                    b -> executor.confirmPurchase()).dimensions(left, approveY, halfW, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Decline"),
+                    b -> executor.declinePurchase())
+                    .dimensions(left + PANEL_W / 2 + 2, approveY, halfW, 20).build());
         }
 
         int controlY = this.height - 28;
@@ -117,6 +146,42 @@ public class BuildOptionsScreen extends Screen {
                 .dimensions(left + 234, controlY, 76, 20).build());
     }
 
+
+    /**
+     * Places the collected rows, shrinking row height to fit the space actually
+     * available. At GUI scale 3 or 4 the usable height is only ~270px, and a
+     * fixed 21px row pitch pushed the last options underneath the footer and the
+     * Start/Pause/Stop buttons, where they could not be clicked.
+     */
+    private void layoutRows(int x, int top) {
+        int bottom = this.height - 46;          // clear of the footer and controls
+        int available = Math.max(40, bottom - top);
+
+        int headers = 0, widgets = 0;
+        for (Row row : rows) {
+            if (row.header() != null) headers++; else widgets++;
+        }
+        if (widgets == 0 && headers == 0) return;
+
+        int headerH = 11;
+        int rowH = ROW_H;
+        while (rowH > MIN_ROW_H && headers * headerH + widgets * rowH > available) rowH--;
+        if (headers * headerH + widgets * rowH > available) headerH = 9;
+
+        int widgetH = Math.max(MIN_WIDGET_H, rowH - 1);
+        int y = top;
+        for (Row row : rows) {
+            if (row.header() != null) {
+                labels.add(new Label(x, y, row.header(), HEADER));
+                y += headerH;
+            } else {
+                addDrawableChild(row.factory().make(x, y, widgetH));
+                y += rowH;
+            }
+        }
+        contentBottom = y;
+    }
+
     private void switchTo(int target) {
         applyPending();
         MinecraftClient.getInstance().setScreen(
@@ -125,214 +190,161 @@ public class BuildOptionsScreen extends Screen {
 
     // ---------------------------------------------------------------- tabs
 
-    private void buildTab(int x, int y) {
-        y = header(x, y, "Schematic");
-        addDrawableChild(field(x, y, "File name (config/litematica/schematics)",
+    private void buildTab() {
+        head("Schematic");
+        row((x, y, h) -> field(x, y, h, "File name (config/litematica/schematics)",
                 schematicSource.getFile() != null ? schematicSource.getFile().getFileName().toString() : "",
                 this::applySchematicFile));
-        y += ROW_H;
-
         BlockPos origin = schematicSource.getOrigin();
-        addDrawableChild(field(x, y, "Origin: x y z",
+        row((x, y, h) -> field(x, y, h, "Origin: x y z",
                 origin.getX() + " " + origin.getY() + " " + origin.getZ(), this::applyOrigin));
-        y += ROW_H;
 
-        y = header(x, y, "Order");
-        addDrawableChild(cycler(x, y, "Order", BuilderConfig.BuildStrategy.values(),
+        head("Order");
+        row((x, y, h) -> cycler(x, y, h, "Order", BuilderConfig.BuildStrategy.values(),
                 () -> config.strategy, v -> config.strategy = v, v -> v.label));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Direction", BuilderConfig.LayerDirection.values(),
+        row((x, y, h) -> cycler(x, y, h, "Direction", BuilderConfig.LayerDirection.values(),
                 () -> config.layerDirection, v -> config.layerDirection = v, v -> v.label));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Finish each layer first",
+        row((x, y, h) -> toggle(x, y, h, "Finish each layer first",
                 () -> config.strictLayers, v -> config.strictLayers = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Scaffold", BuilderConfig.ScaffoldBlock.values(),
+        row((x, y, h) -> cycler(x, y, h, "Scaffold", BuilderConfig.ScaffoldBlock.values(),
                 () -> config.scaffoldBlock, v -> config.scaffoldBlock = v, v -> v.label));
-        y += ROW_H;
 
-        y = header(x, y, "Matching the schematic");
-        addDrawableChild(toggle(x, y, "Require exact block match",
+        head("Matching the schematic");
+        row((x, y, h) -> toggle(x, y, h, "Require exact block match",
                 () -> config.strictBlockMatch, v -> config.strictBlockMatch = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Break wrong blocks",
+        row((x, y, h) -> toggle(x, y, h, "Break wrong blocks",
                 () -> config.breakWrongBlocks, v -> config.breakWrongBlocks = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Remove extra blocks",
+        row((x, y, h) -> toggle(x, y, h, "Remove extra blocks",
                 () -> config.removeExtraBlocks, v -> config.removeExtraBlocks = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Verify pass at end",
+        row((x, y, h) -> toggle(x, y, h, "Verify pass at end",
                 () -> config.verifyPass, v -> config.verifyPass = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Re-check while building",
+        row((x, y, h) -> toggle(x, y, h, "Re-check while building",
                 () -> config.continuousVerify, v -> config.continuousVerify = v));
     }
 
-    private void moveTab(int x, int y) {
-        y = header(x, y, "Traversal");
-        addDrawableChild(toggle(x, y, "Pearl climbing",
+    private void moveTab() {
+        head("Traversal");
+        row((x, y, h) -> toggle(x, y, h, "Pearl climbing",
                 () -> config.usePearlClimbing, v -> config.usePearlClimbing = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Pearl reserve", new Integer[]{0, 2, 4, 8, 16},
+        row((x, y, h) -> cycler(x, y, h, "Pearl reserve", new Integer[]{0, 2, 4, 8, 16},
                 () -> config.pearlReserve, v -> config.pearlReserve = v, String::valueOf));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Allow jumping", () -> config.allowJump, v -> config.allowJump = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Sprint", () -> config.allowSprint, v -> config.allowSprint = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Max fall", new Integer[]{0, 2, 3, 5, 10},
+        row((x, y, h) -> toggle(x, y, h, "Allow jumping",
+                () -> config.allowJump, v -> config.allowJump = v));
+        row((x, y, h) -> toggle(x, y, h, "Sprint", () -> config.allowSprint, v -> config.allowSprint = v));
+        row((x, y, h) -> cycler(x, y, h, "Max fall", new Integer[]{0, 2, 3, 5, 10},
                 () -> config.maxFallDistance, v -> config.maxFallDistance = v, v -> v + " blocks"));
-        y += ROW_H;
 
-        y = header(x, y, "Placement");
-        addDrawableChild(cycler(x, y, "Reach", new Double[]{3.0, 3.5, 4.0, 4.5},
+        head("Placement");
+        row((x, y, h) -> cycler(x, y, h, "Reach", new Double[]{3.0, 3.5, 4.0, 4.5},
                 () -> config.maxReach, v -> config.maxReach = v, v -> v + " blocks"));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Pathfinding effort", new Integer[]{2000, 4000, 8000, 16000},
+        row((x, y, h) -> cycler(x, y, h, "Pathfinding effort", new Integer[]{2000, 4000, 8000, 16000},
                 () -> config.maxPathNodes, v -> config.maxPathNodes = v, String::valueOf));
-        y += ROW_H;
 
-        y = header(x, y, "Care");
-        addDrawableChild(toggle(x, y, "Sneak near edges",
+        head("Care");
+        row((x, y, h) -> toggle(x, y, h, "Sneak near edges",
                 () -> config.sneakNearEdges, v -> config.sneakNearEdges = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Avoid lava and fire",
+        row((x, y, h) -> toggle(x, y, h, "Avoid lava and fire",
                 () -> config.avoidHazards, v -> config.avoidHazards = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Return to start when done",
+        row((x, y, h) -> toggle(x, y, h, "Return to start when done",
                 () -> config.returnHomeWhenDone, v -> config.returnHomeWhenDone = v));
     }
 
-    private void timingTab(int x, int y) {
-        y = header(x, y, "Speed");
-        addDrawableChild(cycler(x, y, "Pace", BuilderConfig.Pace.values(),
+    private void timingTab() {
+        head("Speed");
+        row((x, y, h) -> cycler(x, y, h, "Pace", BuilderConfig.Pace.values(),
                 () -> config.pace, v -> config.pace = v, Enum::name));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Delay scale", new Integer[]{50, 75, 100, 150, 200, 300},
+        row((x, y, h) -> cycler(x, y, h, "Delay scale", new Integer[]{50, 75, 100, 150, 200, 300},
                 () -> config.speedPercent, v -> config.speedPercent = v, v -> v + "%"));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Randomness", new Integer[]{0, 50, 100, 150, 250},
+        row((x, y, h) -> cycler(x, y, h, "Randomness", new Integer[]{0, 50, 100, 150, 250},
                 () -> config.jitterPercent, v -> config.jitterPercent = v, v -> v + "%"));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Tire out over time",
+        row((x, y, h) -> toggle(x, y, h, "Tire out over time",
                 () -> config.simulateFatigue, v -> config.simulateFatigue = v));
-        y += ROW_H;
 
-        y = header(x, y, "Breaks");
-        addDrawableChild(toggle(x, y, "Take breaks", () -> config.takeBreaks, v -> config.takeBreaks = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Break every", new Integer[]{32, 64, 128, 256, 512},
+        head("Breaks");
+        row((x, y, h) -> toggle(x, y, h, "Take breaks",
+                () -> config.takeBreaks, v -> config.takeBreaks = v));
+        row((x, y, h) -> cycler(x, y, h, "Break every", new Integer[]{32, 64, 128, 256, 512},
                 () -> config.breakEveryBlocks, v -> config.breakEveryBlocks = v, v -> v + " blocks"));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Break length", new Integer[]{5, 15, 30, 60, 120, 300},
+        row((x, y, h) -> cycler(x, y, h, "Break length", new Integer[]{5, 15, 30, 60, 120, 300},
                 () -> config.breakSeconds, v -> config.breakSeconds = v, v -> v + "s"));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Look around on breaks",
+        row((x, y, h) -> toggle(x, y, h, "Look around on breaks",
                 () -> config.lookAroundOnBreak, v -> config.lookAroundOnBreak = v));
     }
 
-    private void buyingTab(int x, int y) {
-        y = header(x, y, "Auction house");
-        addDrawableChild(toggle(x, y, "Buy missing materials",
+    private void buyingTab() {
+        head("Auction house");
+        row((x, y, h) -> toggle(x, y, h, "Buy missing materials",
                 () -> config.autoBuyMaterials, v -> config.autoBuyMaterials = v));
-        y += ROW_H;
-        addDrawableChild(field(x, y, "Command (%s = item)", config.auctionCommandTemplate,
-                s -> { if (!s.isBlank()) config.auctionCommandTemplate = s; }));
-        y += ROW_H;
-        addDrawableChild(field(x, y, "Price regex (group 1 = price)", config.auctionPriceRegex,
-                s -> { if (!s.isBlank()) config.auctionPriceRegex = s; }));
-        y += ROW_H;
+        row((x, y, h) -> field(x, y, h, "Command (%s = item)", config.auctionCommandTemplate,
+                v -> { if (!v.isBlank()) config.auctionCommandTemplate = v; }));
+        row((x, y, h) -> field(x, y, h, "Price regex (group 1 = price)", config.auctionPriceRegex,
+                v -> { if (!v.isBlank()) config.auctionPriceRegex = v; }));
 
-        y = header(x, y, "Price limits (per item)");
-        addDrawableChild(field(x, y, "Buy without asking under",
+        head("Price limits (per item)");
+        row((x, y, h) -> field(x, y, h, "Buy without asking under",
                 String.format("%.0f", config.autoBuyLimit),
-                s -> config.autoBuyLimit = parseDouble(s, config.autoBuyLimit)));
-        y += ROW_H;
-        addDrawableChild(field(x, y, "Never buy over",
+                v -> config.autoBuyLimit = parseDouble(v, config.autoBuyLimit)));
+        row((x, y, h) -> field(x, y, h, "Never buy over",
                 String.format("%.0f", config.hardMaxPrice),
-                s -> config.hardMaxPrice = parseDouble(s, config.hardMaxPrice)));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Ask before expensive buys",
+                v -> config.hardMaxPrice = parseDouble(v, config.hardMaxPrice)));
+        row((x, y, h) -> toggle(x, y, h, "Ask before expensive buys",
                 () -> config.confirmExpensivePurchases, v -> config.confirmExpensivePurchases = v));
-        y += ROW_H;
 
-        y = header(x, y, "Behaviour");
-        addDrawableChild(toggle(x, y, "Check every page for cheapest",
+        head("Behaviour");
+        row((x, y, h) -> toggle(x, y, h, "Check every page for cheapest",
                 () -> config.scanAllPages, v -> config.scanAllPages = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Max pages", new Integer[]{1, 3, 5, 10},
+        row((x, y, h) -> cycler(x, y, h, "Max pages", new Integer[]{1, 3, 5, 10},
                 () -> config.maxAuctionPages, v -> config.maxAuctionPages = v, String::valueOf));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Needs confirm click",
+        row((x, y, h) -> toggle(x, y, h, "Needs confirm click",
                 () -> config.auctionRequiresConfirmClick, v -> config.auctionRequiresConfirmClick = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Buy extra", new Integer[]{0, 10, 25, 50},
+        row((x, y, h) -> cycler(x, y, h, "Buy extra", new Integer[]{0, 10, 25, 50},
                 () -> config.buyExtraPercent, v -> config.buyExtraPercent = v, v -> v + "%"));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "If unavailable", BuilderConfig.OutOfMaterialsPolicy.values(),
+        row((x, y, h) -> cycler(x, y, h, "If unavailable", BuilderConfig.OutOfMaterialsPolicy.values(),
                 () -> config.outOfMaterials, v -> config.outOfMaterials = v, v -> v.label));
     }
 
-    private void safetyTab(int x, int y) {
-        y = header(x, y, "Stop conditions");
-        addDrawableChild(toggle(x, y, "Stop on low health",
+    private void safetyTab() {
+        head("Stop conditions");
+        row((x, y, h) -> toggle(x, y, h, "Stop on low health",
                 () -> config.stopOnLowHealth, v -> config.stopOnLowHealth = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Health floor", new Integer[]{4, 6, 10, 14},
+        row((x, y, h) -> cycler(x, y, h, "Health floor", new Integer[]{4, 6, 10, 14},
                 () -> config.lowHealthThreshold, v -> config.lowHealthThreshold = v,
                 v -> (v / 2.0) + " hearts"));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Stop on low hunger",
+        row((x, y, h) -> toggle(x, y, h, "Stop on low hunger",
                 () -> config.stopOnLowHunger, v -> config.stopOnLowHunger = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Stop if player nearby",
+        row((x, y, h) -> toggle(x, y, h, "Stop if player nearby",
                 () -> config.stopOnPlayerNearby, v -> config.stopOnPlayerNearby = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Player radius", new Integer[]{16, 32, 64, 128},
+        row((x, y, h) -> cycler(x, y, h, "Player radius", new Integer[]{16, 32, 64, 128},
                 () -> config.stopOnPlayerRadius, v -> config.stopOnPlayerRadius = v, v -> v + " blocks"));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Stop when inventory full",
+        row((x, y, h) -> toggle(x, y, h, "Stop when inventory full",
                 () -> config.stopWhenInventoryFull, v -> config.stopWhenInventoryFull = v));
-        y += ROW_H;
-        addDrawableChild(cycler(x, y, "Time limit", new Integer[]{0, 15, 30, 60, 120, 480},
+        row((x, y, h) -> cycler(x, y, h, "Time limit", new Integer[]{0, 15, 30, 60, 120, 480},
                 () -> config.maxBuildMinutes, v -> config.maxBuildMinutes = v,
                 v -> v == 0 ? "none" : v + " min"));
-        y += ROW_H;
 
-        y = header(x, y, "Other");
-        addDrawableChild(toggle(x, y, "Auto-pick tools",
+        head("Other");
+        row((x, y, h) -> toggle(x, y, h, "Auto-pick tools",
                 () -> config.autoSelectTool, v -> config.autoSelectTool = v));
-        y += ROW_H;
-        addDrawableChild(toggle(x, y, "Remember settings",
+        row((x, y, h) -> toggle(x, y, h, "Remember settings",
                 () -> config.saveSettings, v -> config.saveSettings = v));
     }
 
-    /** The shopping list: what the plan needs and what's still missing. */
-    private void itemsTab(int x, int y) {
-        header(x, y, "Materials");
-        // Body is drawn in render() so the numbers stay live while the build runs.
+    /** The shopping list: body is drawn in render() so the numbers stay live. */
+    private void itemsTab() {
+        head("Materials");
     }
 
-    private void statusTab(int x, int y) {
-        header(x, y, "Progress");
-        if (executor.isAwaitingPurchaseConfirmation()) {
-            int buttonY = this.height - 76;
-            addDrawableChild(ButtonWidget.builder(Text.literal("Approve purchase"),
-                    b -> executor.confirmPurchase()).dimensions(x, buttonY, 153, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Decline"),
-                    b -> executor.declinePurchase()).dimensions(x + 157, buttonY, 153, 20).build());
-        }
+    private void statusTab() {
+        head("Progress");
+        // The approve/decline pair is placed in init() at a fixed spot rather
+        // than as rows: rows lay out top-down, which would put the buttons above
+        // the statistics they refer to.
     }
 
     // ---------------------------------------------------------------- widgets
 
-    private int header(int x, int y, String text) {
-        labels.add(new Label(x, y, text, HEADER));
-        return y + 11;
-    }
-
     /** A button reading "Label: value" that advances to the next value on click. */
-    private <T> ButtonWidget cycler(int x, int y, String label, T[] values,
+    private <T> ButtonWidget cycler(int x, int y, int h, String label, T[] values,
                                     Supplier<T> getter, Consumer<T> setter, Function<T, String> render) {
         return ButtonWidget.builder(Text.literal(label + ": " + render.apply(getter.get())), btn -> {
             T current = getter.get();
@@ -344,12 +356,12 @@ public class BuildOptionsScreen extends Screen {
             setter.accept(next);
             btn.setMessage(Text.literal(label + ": " + render.apply(next)));
             AutoBuilderClient.saveConfig();
-        }).dimensions(x, y, PANEL_W, 20).build();
+        }).dimensions(x, y, PANEL_W, h).build();
     }
 
-    private ButtonWidget toggle(int x, int y, String label,
+    private ButtonWidget toggle(int x, int y, int h, String label,
                                 Supplier<Boolean> getter, Consumer<Boolean> setter) {
-        return cycler(x, y, label, new Boolean[]{Boolean.TRUE, Boolean.FALSE},
+        return cycler(x, y, h, label, new Boolean[]{Boolean.TRUE, Boolean.FALSE},
                 getter, setter, v -> v ? "ON" : "OFF");
     }
 
@@ -357,8 +369,8 @@ public class BuildOptionsScreen extends Screen {
      * Text fields don't push on every keystroke -- the apply runs on tab change,
      * start, or close, so a half-typed value never lands in the config.
      */
-    private TextFieldWidget field(int x, int y, String placeholder, String initial, Consumer<String> apply) {
-        TextFieldWidget widget = new TextFieldWidget(this.textRenderer, x, y, PANEL_W, 20, Text.literal(placeholder));
+    private TextFieldWidget field(int x, int y, int h, String placeholder, String initial, Consumer<String> apply) {
+        TextFieldWidget widget = new TextFieldWidget(this.textRenderer, x, y, PANEL_W, h, Text.literal(placeholder));
         widget.setMaxLength(256);
         widget.setText(initial);
         widget.setPlaceholder(Text.literal(placeholder));
@@ -438,7 +450,7 @@ public class BuildOptionsScreen extends Screen {
     }
 
     private void renderItems(DrawContext context, int x) {
-        int y = 30 + TAB_H + 8 + 11;
+        int y = contentBottom + 2;
         Map<Item, Integer> needed = executor.getMaterials();
         if (needed.isEmpty()) {
             context.drawTextWithShadow(this.textRenderer,
@@ -469,7 +481,7 @@ public class BuildOptionsScreen extends Screen {
     }
 
     private void renderStatus(DrawContext context, int x) {
-        int y = 30 + TAB_H + 8 + 11;
+        int y = contentBottom + 2;
 
         int done = executor.getPlacedCount();
         int total = executor.getTotalCount();
