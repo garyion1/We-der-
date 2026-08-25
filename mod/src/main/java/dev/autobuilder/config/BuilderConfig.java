@@ -46,7 +46,17 @@ public class BuilderConfig {
         public BlockState state() { return block.getDefaultState(); }
     }
 
-    public BuildStrategy strategy = BuildStrategy.BOTTOM_UP_LAYERS;
+    /**
+     * SCAFFOLD_AWARE by default: still strictly layer by layer (see isLayered()
+     * in BuildPlanner), but any block with no walkable support gets a temporary
+     * column dropped under it first so the builder climbs on real placed blocks
+     * instead of needing a pearl throw to reach it. BOTTOM_UP_LAYERS with no
+     * scaffolding leans on pearl climbing for every upper layer, and pearl
+     * landings are only an approximate physics simulation -- an overshoot lands
+     * the builder outside the structure with no walkable route back nearby,
+     * which is what reads as "running off" and "not building" upper layers.
+     */
+    public BuildStrategy strategy = BuildStrategy.SCAFFOLD_AWARE;
     public LayerDirection layerDirection = LayerDirection.BOTTOM_UP;
     public ScaffoldBlock scaffoldBlock = ScaffoldBlock.DIRT;
     /** Break blocks that already occupy a target position but are the wrong type. */
@@ -84,8 +94,16 @@ public class BuilderConfig {
 
     // ================================================================ movement
 
-    /** Use ender pearls to bridge vertical gaps the pathfinder can't walk or jump. */
-    public boolean usePearlClimbing = true;
+    /**
+     * Use ender pearls to bridge vertical gaps the pathfinder can't walk or
+     * jump. OFF by default: the landing spot is only an approximate physics
+     * simulation, and a bad throw puts the builder somewhere unpredictable,
+     * possibly well outside the structure. With the default SCAFFOLD_AWARE
+     * strategy, scaffolding covers the same gaps by climbing on real blocks
+     * instead, so this is only worth turning on for a build with genuinely
+     * unreachable floating sections and no scaffold path to them.
+     */
+    public boolean usePearlClimbing = false;
     /** Won't throw pearls for climbing if it would drop the stack below this. */
     public int pearlReserve = 4;
     /** How close the builder gets to a block before placing it. */
