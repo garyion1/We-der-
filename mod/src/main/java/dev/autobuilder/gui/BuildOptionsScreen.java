@@ -290,9 +290,6 @@ public class BuildOptionsScreen extends Screen {
 
     private void moveTab() {
         head("Traversal");
-        toggle("Pearl climbing", () -> config.usePearlClimbing, v -> config.usePearlClimbing = v);
-        cycler("Pearl reserve", new Integer[]{0, 2, 4, 8, 16},
-                () -> config.pearlReserve, v -> config.pearlReserve = v, String::valueOf);
         toggle("Allow jumping", () -> config.allowJump, v -> config.allowJump = v);
         toggle("Sprint", () -> config.allowSprint, v -> config.allowSprint = v);
         cycler("Max fall", new Integer[]{0, 2, 3, 5, 10},

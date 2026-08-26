@@ -32,16 +32,15 @@ import java.util.*;
  * The tick-driven state machine that actually plays the game: walk, look,
  * clear what's in the way, place, restock, rest, repeat.
  *
- * Per placement the cycle is NAVIGATE (pearl-climbing where there's no walkable
- * route) -> ALIGN -> ENSURE_ITEM (shopping the auction house if enabled) ->
- * BREAK if something wrong occupies the spot -> PLACE -> DWELL, with REST
- * folded in every breakEveryBlocks placements.
+ * Per placement the cycle is NAVIGATE -> ALIGN -> ENSURE_ITEM (shopping the
+ * auction house if enabled) -> BREAK if something wrong occupies the spot ->
+ * PLACE -> DWELL, with REST folded in every breakEveryBlocks placements.
  */
 public class BuildExecutor {
 
     public enum State { IDLE, PLANNING, RUNNING, PAUSED, RETURNING_HOME, DONE, FAILED }
     private enum Step {
-        NAVIGATE, PEARL_THROW, PEARL_WAIT, ALIGN, ENSURE_ITEM, FETCH_ITEM, BREAK, PLACE, DWELL, RETRY_WAIT, REST, SKIP
+        NAVIGATE, ALIGN, ENSURE_ITEM, FETCH_ITEM, BREAK, PLACE, DWELL, RETRY_WAIT, REST, SKIP
     }
 
     private final BuilderConfig config;
@@ -63,7 +62,6 @@ public class BuildExecutor {
     private HumanMotion.LookState look = new HumanMotion.LookState(0, 0);
 
     private int waitTicks;
-    private BlockPos pearlLandingTarget;
     /** The creative-mode item fetch in progress, and which hotbar slot it's going into. */
     private Item fetchItem;
     private int fetchSlot;
@@ -421,8 +419,6 @@ public class BuildExecutor {
 
         switch (step) {
             case NAVIGATE -> handleNavigate(client, player, bp);
-            case PEARL_THROW -> handlePearlThrow(client, player);
-            case PEARL_WAIT -> handlePearlWait(client, player);
             case ALIGN -> handleAlign(client, player, bp);
             case ENSURE_ITEM -> handleEnsureItem(client, player, bp);
             case FETCH_ITEM -> handleFetchItem(client, player);
@@ -540,7 +536,7 @@ public class BuildExecutor {
         }
         if (path.isEmpty() && pathIndex == 0) {
             BlockPos standGoal = computeStandPosition(client, player, bp);
-            path = buildPath(client, player, standGoal, true, true);
+            path = buildPath(client, player, standGoal, true);
             if (path.isEmpty()) {
                 // Can't route there at all -- give up on this block rather than stall forever.
                 announceStatus(player, "couldn't find a way to " + bp.pos().toShortString());
@@ -590,16 +586,11 @@ public class BuildExecutor {
         return true;
     }
 
-    /**
-     * Walks back to where the build began. Deliberately routed without pearl
-     * climbing: the pearl steps are driven by the placement state machine, which
-     * isn't running any more, so a pearl step here would never be thrown and the
-     * walk would stall forever.
-     */
+    /** Walks back to where the build began. */
     private void handleReturnHome(MinecraftClient client, ClientPlayerEntity player) {
         if (actionsBlocked(client)) { resetInputs(); return; }
         if (path.isEmpty() && pathIndex == 0) {
-            path = buildPath(client, player, homePosition, false, false);
+            path = buildPath(client, player, homePosition, false);
             if (path.isEmpty()) {
                 finishReturn("couldn't find a way back to the start");
                 return;
@@ -657,9 +648,9 @@ public class BuildExecutor {
     private static final int BUILD_AREA_MARGIN_TIGHT = 6;
 
     private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player,
-                                                BlockPos goal, boolean allowPearls, boolean fenceToSchematic) {
+                                                BlockPos goal, boolean fenceToSchematic) {
         if (!fenceToSchematic || buildArea == null) {
-            return findPathWithMargin(client, player, goal, allowPearls, -1);
+            return findPathWithMargin(client, player, goal, -1);
         }
         // Only attempt the tight search when the player is already within
         // it. findPathWithMargin drops its fence entirely if the player
@@ -673,15 +664,15 @@ public class BuildExecutor {
         // Skipping straight to the wide search in that case keeps every
         // attempt that actually runs properly fenced.
         if (buildArea.contains(player.getBlockPos(), BUILD_AREA_MARGIN_TIGHT)) {
-            List<PathFinder.PathStep> tight = findPathWithMargin(client, player, goal, allowPearls, BUILD_AREA_MARGIN_TIGHT);
+            List<PathFinder.PathStep> tight = findPathWithMargin(client, player, goal, BUILD_AREA_MARGIN_TIGHT);
             if (!tight.isEmpty()) return tight;
         }
-        return findPathWithMargin(client, player, goal, allowPearls, BUILD_AREA_MARGIN);
+        return findPathWithMargin(client, player, goal, BUILD_AREA_MARGIN);
     }
 
     /** margin < 0 means unfenced (used for the return-home walk). */
     private List<PathFinder.PathStep> findPathWithMargin(MinecraftClient client, ClientPlayerEntity player,
-                                                          BlockPos goal, boolean allowPearls, int margin) {
+                                                          BlockPos goal, int margin) {
         // If the player is currently outside the fence (shouldn't normally
         // happen now that buildPath only tries the tight margin when
         // already inside it) drop it rather than trap them with no path.
@@ -689,7 +680,6 @@ public class BuildExecutor {
                 && buildArea.contains(player.getBlockPos(), margin);
         PathFinder finder = new PathFinder(
                 pos -> isStandable(client, pos) && (!applyFence || buildArea.contains(pos, margin)),
-                allowPearls && config.usePearlClimbing, 32,
                 config.allowJump, config.maxFallDistance);
         return finder.findPath(player.getBlockPos(), goal, config.maxPathNodes);
     }
@@ -712,11 +702,6 @@ public class BuildExecutor {
     /** Returns true if genuinely stuck and recovery attempts are exhausted -- the caller should give up on this walk. */
     private boolean walkOneStep(MinecraftClient client, ClientPlayerEntity player) {
         PathFinder.PathStep current = path.get(pathIndex);
-        if (current.type() == PathFinder.StepType.PEARL_CLIMB) {
-            pearlLandingTarget = current.pos();
-            step = Step.PEARL_THROW;
-            return false;
-        }
 
         BlockPos nowPos = player.getBlockPos();
         if (nowPos.equals(stuckCheckPos)) {
@@ -851,75 +836,6 @@ public class BuildExecutor {
                 || state.isOf(Blocks.SWEET_BERRY_BUSH) || state.isOf(Blocks.POWDER_SNOW);
     }
 
-    // -- PEARL CLIMB -----------------------------------------------------
-    // Approximate: binary-search a throw pitch that a simple gravity+drag
-    // simulation predicts will land near the target. Real net latency and
-    // server-side pearl physics will disagree with this somewhat -- expect
-    // to tune PEARL_SPEED/GRAVITY/DRAG or the pitch search bounds in-game.
-
-    private static final double PEARL_SPEED = 1.5, PEARL_GRAVITY = 0.03, PEARL_DRAG = 0.99;
-
-    private void handlePearlThrow(MinecraftClient client, ClientPlayerEntity player) {
-        int pearlSlot = findHotbarOrInventorySlot(player, Items.ENDER_PEARL);
-        int pearlCount = countItem(player, Items.ENDER_PEARL);
-        if (pearlSlot < 0 || pearlCount <= config.pearlReserve) {
-            announceStatus(player, "out of ender pearls (reserve=" + config.pearlReserve + ") -- can't climb, skipping block");
-            consecutiveFailures++;
-            advance(false);
-            return;
-        }
-        selectHotbarSlot(player, pearlSlot);
-
-        Vec3d eye = player.getEyePos();
-        double dx = pearlLandingTarget.getX() + 0.5 - eye.x;
-        double dz = pearlLandingTarget.getZ() + 0.5 - eye.z;
-        double dy = pearlLandingTarget.getY() - eye.y;
-        double horizDist = Math.sqrt(dx * dx + dz * dz);
-        float targetYaw = (float) Math.toDegrees(Math.atan2(dz, dx)) - 90f;
-        float targetPitch = solvePearlPitch(horizDist, dy);
-
-        look = motion.stepLook(look, targetYaw, targetPitch);
-        player.setYaw(look.yaw());
-        player.setPitch(look.pitch());
-
-        if (motion.lookCloseEnough(look, targetYaw, targetPitch)) {
-            client.interactionManager.interactItem(player, Hand.MAIN_HAND);
-            waitTicks = 40; // give the pearl time to fly + teleport to resolve
-            step = Step.PEARL_WAIT;
-        }
-    }
-
-    private float solvePearlPitch(double horizontalDistance, double desiredDy) {
-        float lo = -80f, hi = 75f;
-        for (int i = 0; i < 20; i++) {
-            float mid = (lo + hi) / 2f;
-            double landedDy = simulatePearlDy(mid, horizontalDistance);
-            if (landedDy > desiredDy) lo = mid; else hi = mid;
-        }
-        return (lo + hi) / 2f;
-    }
-
-    private double simulatePearlDy(double pitchDeg, double horizontalDistance) {
-        double pitchRad = Math.toRadians(pitchDeg);
-        double vHoriz = PEARL_SPEED * Math.cos(pitchRad);
-        double vY = -PEARL_SPEED * Math.sin(pitchRad);
-        double x = 0, y = 0;
-        for (int t = 0; t < 400 && x < horizontalDistance; t++) {
-            x += vHoriz;
-            y += vY;
-            vY = (vY - PEARL_GRAVITY) * PEARL_DRAG;
-            vHoriz *= PEARL_DRAG;
-        }
-        return y;
-    }
-
-    private void handlePearlWait(MinecraftClient client, ClientPlayerEntity player) {
-        if (waitTicks-- <= 0 || player.getBlockPos().isWithinDistance(pearlLandingTarget, 3.0)) {
-            pathIndex++;
-            step = Step.NAVIGATE;
-        }
-    }
-
     // -- ALIGN / PLACE ---------------------------------------------------
 
     private void handleAlign(MinecraftClient client, ClientPlayerEntity player, BlockPlacement bp) {
@@ -965,7 +881,7 @@ public class BuildExecutor {
         Item needed = bp.state().getBlock().asItem();
         // Some blocks (fire, fluids that slipped through skipFluids) have no placeable
         // item form. asItem() returns AIR, which would incorrectly match empty hotbar slots.
-        if (needed == null || needed == net.minecraft.item.Items.AIR) {
+        if (needed == null || needed == Items.AIR) {
             skipped.add(bp);
             advance(false);
             return;

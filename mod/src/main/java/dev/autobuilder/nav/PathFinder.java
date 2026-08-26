@@ -6,15 +6,9 @@ import java.util.*;
 
 /**
  * Grid A* over block positions, decoupled from the live Minecraft world via
- * the WalkableCheck callback so the search itself stays testable. Two edge
- * types beyond plain walking/stepping:
- *  - JUMP: a 1-block rise the player can just jump onto.
- *  - PEARL_CLIMB: used only when the walkable graph has no ordinary route up
- *    within reach (a sheer wall, a tower) -- an edge straight up to the
- *    nearest standable spot, representing "throw a pearl, land there".
- * Pearl edges are deliberately expensive relative to walking so the search
- * only reaches for one when there's genuinely no ground path, not as a
- * shortcut past normal stairs/ramps.
+ * the WalkableCheck callback so the search itself stays testable. One edge
+ * type beyond plain walking/stepping: JUMP, a 1-block rise the player can
+ * just jump onto.
  */
 public class PathFinder {
 
@@ -23,7 +17,7 @@ public class PathFinder {
         boolean isStandable(BlockPos feetPos);
     }
 
-    public enum StepType { WALK, JUMP, DROP, PEARL_CLIMB }
+    public enum StepType { WALK, JUMP, DROP }
 
     public record PathStep(BlockPos pos, StepType type) {}
 
@@ -33,16 +27,11 @@ public class PathFinder {
     };
 
     private final WalkableCheck walkable;
-    private final boolean allowPearlClimb;
-    private final int maxPearlRise;
     private final boolean allowJump;
     private final int maxFallDistance;
 
-    public PathFinder(WalkableCheck walkable, boolean allowPearlClimb, int maxPearlRise,
-                      boolean allowJump, int maxFallDistance) {
+    public PathFinder(WalkableCheck walkable, boolean allowJump, int maxFallDistance) {
         this.walkable = walkable;
-        this.allowPearlClimb = allowPearlClimb;
-        this.maxPearlRise = maxPearlRise;
         this.allowJump = allowJump;
         this.maxFallDistance = Math.max(0, maxFallDistance);
     }
@@ -102,19 +91,6 @@ public class PathFinder {
                         edges.add(new Edge(landing, StepType.DROP, dist * (1.1 + drop * 0.25)));
                         break;
                     }
-                }
-            }
-        }
-
-        if (allowPearlClimb) {
-            for (int rise = 3; rise <= maxPearlRise; rise++) {
-                BlockPos target = from.up(rise);
-                if (walkable.isStandable(target)) {
-                    // Cost dominated by a flat "wind-up" cost so the search only
-                    // takes this when walking genuinely can't reach, plus a small
-                    // per-block term so it still prefers the shortest usable pearl.
-                    edges.add(new Edge(target, StepType.PEARL_CLIMB, 6.0 + rise * 0.08));
-                    break; // nearest reachable landing above is enough as a candidate edge
                 }
             }
         }
