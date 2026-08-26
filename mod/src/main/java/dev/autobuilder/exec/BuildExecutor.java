@@ -661,8 +661,21 @@ public class BuildExecutor {
         if (!fenceToSchematic || buildArea == null) {
             return findPathWithMargin(client, player, goal, allowPearls, -1);
         }
-        List<PathFinder.PathStep> tight = findPathWithMargin(client, player, goal, allowPearls, BUILD_AREA_MARGIN_TIGHT);
-        if (!tight.isEmpty()) return tight;
+        // Only attempt the tight search when the player is already within
+        // it. findPathWithMargin drops its fence entirely if the player
+        // starts outside the margin being tried (so a genuinely stranded
+        // player is never left with zero valid paths) -- but being more
+        // than 6 blocks from the structure is completely ordinary, so
+        // trying the tight margin unconditionally meant that escape hatch
+        // fired on nearly every walk, ran the "tight" search fully
+        // unfenced, and (since an unfenced search almost always succeeds)
+        // meant the properly-fenced wide fallback below was never reached.
+        // Skipping straight to the wide search in that case keeps every
+        // attempt that actually runs properly fenced.
+        if (buildArea.contains(player.getBlockPos(), BUILD_AREA_MARGIN_TIGHT)) {
+            List<PathFinder.PathStep> tight = findPathWithMargin(client, player, goal, allowPearls, BUILD_AREA_MARGIN_TIGHT);
+            if (!tight.isEmpty()) return tight;
+        }
         return findPathWithMargin(client, player, goal, allowPearls, BUILD_AREA_MARGIN);
     }
 
@@ -670,7 +683,8 @@ public class BuildExecutor {
     private List<PathFinder.PathStep> findPathWithMargin(MinecraftClient client, ClientPlayerEntity player,
                                                           BlockPos goal, boolean allowPearls, int margin) {
         // If the player is currently outside the fence (shouldn't normally
-        // happen) drop it rather than trap them with no path.
+        // happen now that buildPath only tries the tight margin when
+        // already inside it) drop it rather than trap them with no path.
         boolean applyFence = margin >= 0 && buildArea != null
                 && buildArea.contains(player.getBlockPos(), margin);
         PathFinder finder = new PathFinder(
