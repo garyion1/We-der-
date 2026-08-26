@@ -567,7 +567,14 @@ public class BuildExecutor {
             step = Step.ALIGN;
             return;
         }
-        walkOneStep(client, player);
+        if (walkOneStep(client, player)) {
+            announceStatus(player, "stuck near " + player.getBlockPos().toShortString()
+                    + " -- giving up on " + bp.pos().toShortString());
+            skipped.add(bp);
+            consecutiveFailures++;
+            resetInputs();
+            advance(false);
+        }
     }
 
     /**
@@ -604,7 +611,9 @@ public class BuildExecutor {
             finishReturn("back at the start");
             return;
         }
-        walkOneStep(client, player);
+        if (walkOneStep(client, player)) {
+            finishReturn("got stuck partway back");
+        }
     }
 
     private void finishReturn(String note) {
@@ -652,16 +661,55 @@ public class BuildExecutor {
         return finder.findPath(player.getBlockPos(), goal, config.maxPathNodes);
     }
 
-    private void walkOneStep(MinecraftClient client, ClientPlayerEntity player) {
+    // A planned path assumes the simplified isStandable() model matches
+    // reality; a slab, a fence, or subtle real collision it didn't account
+    // for can physically block a step the plan thought was clear. Nothing
+    // about the distance-based completion check below would ever notice --
+    // it would just hold the forward key forever, standing in the same spot
+    // indefinitely. These track how long the feet position has actually
+    // stayed put and escalate from "try jumping" to "abandon this path for a
+    // fresh one" to, after enough failed attempts, giving up.
+    private static final int STUCK_TICKS_TO_JUMP = 15;
+    private static final int STUCK_TICKS_TO_REPATH = 40;
+    private static final int MAX_STUCK_RECOVERIES = 3;
+    private BlockPos stuckCheckPos;
+    private int stuckTicks;
+    private int stuckRecoveries;
+
+    /** Returns true if genuinely stuck and recovery attempts are exhausted -- the caller should give up on this walk. */
+    private boolean walkOneStep(MinecraftClient client, ClientPlayerEntity player) {
         PathFinder.PathStep current = path.get(pathIndex);
         if (current.type() == PathFinder.StepType.PEARL_CLIMB) {
             pearlLandingTarget = current.pos();
             step = Step.PEARL_THROW;
-            return;
+            return false;
+        }
+
+        BlockPos nowPos = player.getBlockPos();
+        if (nowPos.equals(stuckCheckPos)) {
+            stuckTicks++;
+        } else {
+            stuckCheckPos = nowPos;
+            stuckTicks = 0;
+            stuckRecoveries = 0; // real movement means we're not stuck any more
+        }
+
+        if (stuckTicks >= STUCK_TICKS_TO_REPATH) {
+            stuckTicks = 0;
+            resetInputs();
+            path = List.of();
+            pathIndex = 0;
+            if (++stuckRecoveries > MAX_STUCK_RECOVERIES) {
+                stuckRecoveries = 0;
+                return true;
+            }
+            statusMessage = "stuck -- recalculating a route";
+            return false;
         }
 
         stepToward(client, player, current.pos(), current.type());
-        if (config.allowJump && current.type() == PathFinder.StepType.JUMP && player.isOnGround()) {
+        boolean shouldJump = (current.type() == PathFinder.StepType.JUMP) || stuckTicks >= STUCK_TICKS_TO_JUMP;
+        if (config.allowJump && shouldJump && player.isOnGround()) {
             client.options.jumpKey.setPressed(true);
         }
         // Sneak when there's a drop next to the next step, so a mistimed input
@@ -672,6 +720,7 @@ public class BuildExecutor {
             client.options.jumpKey.setPressed(false);
             pathIndex++;
         }
+        return false;
     }
 
     /** True if any block orthogonally adjacent to this one has nothing solid beneath it. */
@@ -1120,6 +1169,7 @@ public class BuildExecutor {
         path = List.of();
         pathIndex = 0;
         step = Step.NAVIGATE;
+        stuckRecoveries = 0;
 
         if (placedOk && config.takeBreaks && ++blocksSinceBreak >= nextBreakAt) {
             blocksSinceBreak = 0;
