@@ -166,6 +166,7 @@ public class BuildExecutor {
         this.retriesOnCurrent = 0;
         this.consecutiveFailures = 0;
         this.replansSinceProgress = 0;
+        clearWalkState();
         this.homePosition = client.player != null ? client.player.getBlockPos() : null;
         this.motion = new HumanMotion(config); // pick up any pace change from the GUI
         this.unbuyable.clear();
@@ -189,6 +190,29 @@ public class BuildExecutor {
         state = State.IDLE;
         resetInputs();
         statusMessage = "stopped";
+        // A stuck-recovery that hadn't yet been consumed by a buildPath call
+        // would otherwise survive into the next, unrelated build's very
+        // first path search.
+        clearWalkState();
+    }
+
+    /**
+     * Clears everything describing an in-flight walk: the route itself and
+     * the stuck-recovery tracking built up while following it. Without
+     * resetting path/pathIndex too, a replan or restart that lands mid-walk
+     * (Stop clicked mid-route, then Start again; continuousVerify's drift
+     * check firing while NAVIGATE has an active path) would leave
+     * handleNavigate's "already have a path" check finding a stale route
+     * computed for a completely different goal and keep walking it instead
+     * of computing a fresh one for the block actually now at placementIndex.
+     */
+    private void clearWalkState() {
+        path = List.of();
+        pathIndex = 0;
+        stuckCheckPos = null;
+        stuckTicks = 0;
+        stuckRecoveries = 0;
+        avoidOnRepath = null;
     }
 
     public State getState() { return state; }
@@ -312,6 +336,12 @@ public class BuildExecutor {
         placementIndex = 0;
         retriesOnCurrent = 0;
         consecutiveFailures = 0;
+        // A pending stuck-recovery exclusion belongs to whatever walk set it;
+        // a replan can land here (continuousVerify's drift check, or the
+        // auto-replan-on-failure-streak trigger) before that walk's next
+        // buildPath() call ever consumes it, which would otherwise carry a
+        // stale exclusion into this new plan's completely unrelated routes.
+        clearWalkState();
         // Any replan after the first -- the post-completion verify pass, or a
         // mid-build recovery from a run of failures -- keeps the running
         // totals, since it's the same build continuing, not a new one.
@@ -649,8 +679,20 @@ public class BuildExecutor {
 
     private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player,
                                                 BlockPos goal, boolean fenceToSchematic) {
+        // One-shot: a repath triggered by getting physically stuck (see
+        // walkOneStep) records exactly where that happened. Consumed here so
+        // this and only this search steers around it -- otherwise A* has no
+        // memory of the previous attempt and, given the same start/goal/
+        // fence, will often derive the exact same route through the exact
+        // same real-world obstruction (a slab or fence isStandable() didn't
+        // account for) that got the walk stuck in the first place. Left
+        // uncorrected that reads as the bot walking in circles: stuck,
+        // repath, walk the same broken route, stuck again, repeat.
+        BlockPos avoid = avoidOnRepath;
+        avoidOnRepath = null;
+
         if (!fenceToSchematic || buildArea == null) {
-            return findPathWithMargin(client, player, goal, -1);
+            return findPathWithMargin(client, player, goal, -1, avoid);
         }
         // Only attempt the tight search when the player is already within
         // it. findPathWithMargin drops its fence entirely if the player
@@ -664,22 +706,34 @@ public class BuildExecutor {
         // Skipping straight to the wide search in that case keeps every
         // attempt that actually runs properly fenced.
         if (buildArea.contains(player.getBlockPos(), BUILD_AREA_MARGIN_TIGHT)) {
-            List<PathFinder.PathStep> tight = findPathWithMargin(client, player, goal, BUILD_AREA_MARGIN_TIGHT);
+            List<PathFinder.PathStep> tight = findPathWithMargin(client, player, goal, BUILD_AREA_MARGIN_TIGHT, avoid);
             if (!tight.isEmpty()) return tight;
         }
-        return findPathWithMargin(client, player, goal, BUILD_AREA_MARGIN);
+        return findPathWithMargin(client, player, goal, BUILD_AREA_MARGIN, avoid);
     }
 
-    /** margin < 0 means unfenced (used for the return-home walk). */
+    /**
+     * margin < 0 means unfenced (used for the return-home walk). avoid, if
+     * not null, is excluded from the walkable graph entirely -- see
+     * buildPath's comment. Deliberately not exempted even when it equals the
+     * goal: if the walk got stuck trying to stand exactly on the goal cell,
+     * the model was wrong about that cell being standable (a real collision
+     * it didn't account for), and excluding it makes the search correctly
+     * fail to find a path rather than derive the exact same route into the
+     * exact same obstruction -- the caller already treats "no path" as
+     * "give up on this block" everywhere else, which is the right outcome
+     * here too.
+     */
     private List<PathFinder.PathStep> findPathWithMargin(MinecraftClient client, ClientPlayerEntity player,
-                                                          BlockPos goal, int margin) {
+                                                          BlockPos goal, int margin, BlockPos avoid) {
         // If the player is currently outside the fence (shouldn't normally
         // happen now that buildPath only tries the tight margin when
         // already inside it) drop it rather than trap them with no path.
         boolean applyFence = margin >= 0 && buildArea != null
                 && buildArea.contains(player.getBlockPos(), margin);
         PathFinder finder = new PathFinder(
-                pos -> isStandable(client, pos) && (!applyFence || buildArea.contains(pos, margin)),
+                pos -> (avoid == null || !pos.equals(avoid))
+                        && isStandable(client, pos) && (!applyFence || buildArea.contains(pos, margin)),
                 config.allowJump, config.maxFallDistance);
         return finder.findPath(player.getBlockPos(), goal, config.maxPathNodes);
     }
@@ -698,6 +752,7 @@ public class BuildExecutor {
     private BlockPos stuckCheckPos;
     private int stuckTicks;
     private int stuckRecoveries;
+    private BlockPos avoidOnRepath;
 
     /** Returns true if genuinely stuck and recovery attempts are exhausted -- the caller should give up on this walk. */
     private boolean walkOneStep(MinecraftClient client, ClientPlayerEntity player) {
@@ -721,6 +776,12 @@ public class BuildExecutor {
                 stuckRecoveries = 0;
                 return true;
             }
+            // The obstruction is the waypoint the walk was trying (and
+            // failing) to reach, not wherever the player ended up standing
+            // -- the player's own position is the new search's start node,
+            // which A* seeds directly without ever consulting the walkable
+            // predicate, so excluding it would have no effect at all.
+            avoidOnRepath = current.pos();
             statusMessage = "stuck -- recalculating a route";
             return false;
         }
