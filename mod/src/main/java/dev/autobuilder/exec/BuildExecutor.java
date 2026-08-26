@@ -105,10 +105,11 @@ public class BuildExecutor {
     private boolean isFirstPlan;
     private BlockPos homePosition;
     /**
-     * The schematic's own bounding box, padded by BUILD_AREA_MARGIN. Build
-     * navigation is fenced to this box so the pathfinder can never wander off
-     * looking for a route -- it either finds one that stays near the
-     * structure, or the block is skipped. Not applied to the return-home walk.
+     * The schematic's own bounding box. Build navigation is fenced to this
+     * box (see buildPath/findPathWithMargin) so the pathfinder can never
+     * wander off looking for a route -- it either finds one that stays near
+     * the structure, or the block is skipped. Not applied to the
+     * return-home walk.
      */
     private record BuildArea(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
         static BuildArea of(Collection<BlockPos> positions) {
@@ -128,13 +129,10 @@ public class BuildExecutor {
                     && p.getZ() >= minZ - margin && p.getZ() <= maxZ + margin;
         }
     }
-    // 6 was too tight for a real build of any real size: legitimately
-    // connected ground can wind further than 6 blocks past the schematic's
-    // own footprint to get around an obstacle, and every position the fence
-    // rules out shows up as "couldn't find a way" even though a real player
-    // could just walk there. Wide enough to comfortably route around most
-    // terrain features without coming close to the unfenced wandering this
-    // was added to stop in the first place.
+    // The fallback margin -- see BUILD_AREA_MARGIN_TIGHT and buildPath() for
+    // why there are two tiers rather than one fixed value. Wide enough to
+    // comfortably route around most real obstacles a build might actually
+    // have around it, tried only once the tight search has already failed.
     private static final int BUILD_AREA_MARGIN = 20;
     private BuildArea buildArea;
     /** Completion text held while walking home, so the final status keeps it. */
@@ -645,17 +643,38 @@ public class BuildExecutor {
         }
     }
 
+    /**
+     * A margin wide enough to route around most real obstacles (previously
+     * BUILD_AREA_MARGIN, and used alone) is also wide enough for the bot to
+     * legitimately walk a full 20 blocks past the structure's own footprint
+     * on completely ordinary terrain with nothing blocking it at all -- from
+     * outside the game that just looks like wandering away from the build,
+     * even though it's technically still fenced. Tried first at a tight
+     * margin that keeps ordinary navigation visibly close to the structure;
+     * only widened as a fallback when the tight search genuinely can't find
+     * a route, so the wide margin is the exception, not the default.
+     */
+    private static final int BUILD_AREA_MARGIN_TIGHT = 6;
+
     private List<PathFinder.PathStep> buildPath(MinecraftClient client, ClientPlayerEntity player,
                                                 BlockPos goal, boolean allowPearls, boolean fenceToSchematic) {
-        // Fencing keeps the search from ever proposing a step far from the
-        // structure -- without it, a blocked direct route makes A* fan out in
-        // every direction looking for *a* way through, which is what sent the
-        // bot wandering off. If the player is currently outside the fence
-        // (shouldn't normally happen) drop it rather than trap them with no path.
-        boolean applyFence = fenceToSchematic && buildArea != null
-                && buildArea.contains(player.getBlockPos(), BUILD_AREA_MARGIN);
+        if (!fenceToSchematic || buildArea == null) {
+            return findPathWithMargin(client, player, goal, allowPearls, -1);
+        }
+        List<PathFinder.PathStep> tight = findPathWithMargin(client, player, goal, allowPearls, BUILD_AREA_MARGIN_TIGHT);
+        if (!tight.isEmpty()) return tight;
+        return findPathWithMargin(client, player, goal, allowPearls, BUILD_AREA_MARGIN);
+    }
+
+    /** margin < 0 means unfenced (used for the return-home walk). */
+    private List<PathFinder.PathStep> findPathWithMargin(MinecraftClient client, ClientPlayerEntity player,
+                                                          BlockPos goal, boolean allowPearls, int margin) {
+        // If the player is currently outside the fence (shouldn't normally
+        // happen) drop it rather than trap them with no path.
+        boolean applyFence = margin >= 0 && buildArea != null
+                && buildArea.contains(player.getBlockPos(), margin);
         PathFinder finder = new PathFinder(
-                pos -> isStandable(client, pos) && (!applyFence || buildArea.contains(pos, BUILD_AREA_MARGIN)),
+                pos -> isStandable(client, pos) && (!applyFence || buildArea.contains(pos, margin)),
                 allowPearls && config.usePearlClimbing, 32,
                 config.allowJump, config.maxFallDistance);
         return finder.findPath(player.getBlockPos(), goal, config.maxPathNodes);
