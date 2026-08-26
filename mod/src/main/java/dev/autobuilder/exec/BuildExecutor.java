@@ -609,8 +609,7 @@ public class BuildExecutor {
         if (!config.returnHomeWhenDone || homePosition == null) return false;
         if (player.getBlockPos().isWithinDistance(homePosition, 2.0)) return false;
         finishedMessage = completionMessage;
-        path = List.of();
-        pathIndex = 0;
+        clearWalkState();
         state = State.RETURNING_HOME;
         statusMessage = "heading back to the start";
         return true;
@@ -748,7 +747,10 @@ public class BuildExecutor {
     // fresh one" to, after enough failed attempts, giving up.
     private static final int STUCK_TICKS_TO_JUMP = 15;
     private static final int STUCK_TICKS_TO_REPATH = 40;
-    private static final int MAX_STUCK_RECOVERIES = 3;
+    // The first recovery is a plain retry with no exclusion (see below), so
+    // 4 total keeps 3 genuine avoidance-based attempts -- the same number a
+    // persistent obstruction got before that first-retry grace period existed.
+    private static final int MAX_STUCK_RECOVERIES = 4;
     private BlockPos stuckCheckPos;
     private int stuckTicks;
     private int stuckRecoveries;
@@ -774,14 +776,31 @@ public class BuildExecutor {
             pathIndex = 0;
             if (++stuckRecoveries > MAX_STUCK_RECOVERIES) {
                 stuckRecoveries = 0;
+                // A prior recovery within this same failed walk may have set
+                // this; giving up here means the block is about to be
+                // skipped and buildPath() will never run again for it, so
+                // nothing will ever consume the exclusion -- left set, it
+                // would silently apply to the next, unrelated block's walk.
+                avoidOnRepath = null;
                 return true;
             }
-            // The obstruction is the waypoint the walk was trying (and
-            // failing) to reach, not wherever the player ended up standing
-            // -- the player's own position is the new search's start node,
-            // which A* seeds directly without ever consulting the walkable
-            // predicate, so excluding it would have no effect at all.
-            avoidOnRepath = current.pos();
+            // isStandable() only checks block solidity, not what's actually
+            // standing there -- a mob or another player merely occupying a
+            // narrow chokepoint looks identical to a genuine terrain/model
+            // mismatch from here, but usually clears on its own within a
+            // couple of seconds. Give the very first stuck cycle a plain
+            // retry with no exclusion, the way this worked before the
+            // avoid-on-repath mechanism existed; only start steering away
+            // from the exact cell once the walk has failed to get through
+            // it more than once in a row, which is what an actually-wrong
+            // model (not a passing mob) looks like. The excluded cell is
+            // current.pos() -- the waypoint the walk was failing to reach --
+            // not the player's own position: that's the new search's start
+            // node, which A* seeds directly without ever consulting the
+            // walkable predicate, so excluding it would have no effect.
+            if (stuckRecoveries > 1) {
+                avoidOnRepath = current.pos();
+            }
             statusMessage = "stuck -- recalculating a route";
             return false;
         }
